@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>本地语音转文字工作台</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🎙️</span>
+      <div>
+        <h1>本地语音转文字工作台</h1>
+        <p id="envInfo" class="muted">加载中…</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <select id="engineSel" title="识别引擎">
+        <option value="qwen3">Qwen3-ASR 0.6B（快·准确）</option>
+        <option value="qwen3-hq">Qwen3-ASR 1.7B（高精度）</option>
+      </select>
+      <button id="btnTranscribe" class="primary">开始转写</button>
+      <button id="btnRules" title="去语气词/口水词">规则清理</button>
+      <button id="btnPolishAll" title="本地 LLM 纠错 + 润色全篇">AI 润色全篇</button>
+      <button id="btnKB" title="提炼知识库资料">生成知识库</button>
+      <div class="dropdown">
+        <button id="btnExport">导出 ▾</button>
+        <div class="menu" id="exportMenu">
+          <button data-fmt="md" data-mode="final">Markdown · 整理稿</button>
+          <button data-fmt="md" data-mode="raw">Markdown · 原始逐字稿</button>
+          <button data-fmt="txt" data-mode="final">TXT · 整理稿</button>
+          <button data-fmt="txt" data-mode="raw">TXT · 原始逐字稿</button>
+          <button data-fmt="srt" data-mode="final">SRT 字幕</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div id="progressWrap" class="progress-wrap hidden">
+    <div class="progress-bar"><div id="progressFill"></div></div>
+    <div id="progressText" class="muted small"></div>
+  </div>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="side-head">
+        <h2>源目录</h2>
+        <span id="sourceDir" class="muted small"></span>
+      </div>
+      <ul id="fileList" class="file-list"></ul>
+      <div class="side-foot">
+        <h3>显示</h3>
+        <label><input type="checkbox" id="showRaw" checked /> 原始识别文本</label>
+        <label><input type="checkbox" id="showPolish" checked /> AI 润色文本</label>
+        <label><input type="checkbox" id="followPlay" checked /> 播放时自动跟随</label>
+        <label><input type="checkbox" id="autoSave" checked /> 编辑自动保存</label>
+      </div>
+    </aside>
+
+    <section class="content">
+      <div class="player">
+        <div class="player-head">
+          <div class="now-title">
+            <h2 id="nowFile">未选择文件</h2>
+            <span id="nowMeta" class="muted small"></span>
+          </div>
+          <div class="player-controls">
+            <button id="btnPlay" class="play">▶</button>
+            <span id="timeCur" class="time">00:00:00</span>
+            <span class="muted">/</span>
+            <span id="timeDur" class="time muted">00:00:00</span>
+            <select id="speedSel" title="播放速度">
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1.0×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2.0×</option>
+            </select>
+            <button id="btnFollow" class="chip active" title="播放时跟随滚动">跟随</button>
+          </div>
+        </div>
+        <canvas id="wave" height="120"></canvas>
+        <audio id="audio" preload="metadata"></audio>
+      </div>
+
+      <div class="transcript-head">
+        <h2>逐字稿</h2>
+        <div class="seg-tools">
+          <span id="segCount" class="muted small">0 段</span>
+          <button id="btnPolishSel" class="chip">AI 润色选中段落</button>
+          <span id="selInfo" class="muted small"></span>
+        </div>
+      </div>
+      <div id="segments" class="segments">
+        <div class="empty">从左侧选择一个音频文件开始</div>
+      </div>
+      <div id="kbBox" class="kb hidden">
+        <div class="kb-head">
+          <h3>知识库资料</h3>
+          <div style="display:flex;gap:6px">
+            <button id="btnKbCopy" class="chip">复制</button>
+            <button id="btnKbToggle" class="chip">收起</button>
+          </div>
+        </div>
+        <pre id="kbText"></pre>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
