@@ -33,7 +33,7 @@
 ## 二、快速开始
 
 ```bash
-cd voice-to-text-workbench
+cd 语音转文字
 ./setup.sh          # 建虚拟环境 + 装依赖 + 下模型（约 6 GB）
 ./run.sh            # 启动界面 → http://127.0.0.1:8787
 ```
@@ -123,7 +123,7 @@ source/*.mp3
 ## 五、目录结构
 
 ```
-voice-to-text-workbench/
+语音转文字/
 ├── setup.sh              一键安装
 ├── run.sh                启动界面
 ├── source/               ← 放音频
