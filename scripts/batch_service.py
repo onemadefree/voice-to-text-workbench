@@ -44,8 +44,14 @@ def api(method: str, path: str, payload=None):
         raise SystemExit(f"{method} {path} → HTTP {exc.code}: {exc.read().decode('utf-8','ignore')[:200]}")
 
 
-def wait_job(doc_id: str, label: str, timeout: float = 14400) -> dict:
-    """等任务跑完。"""
+def wait_job(doc_id: str, label: str, timeout: float = 14400,
+             not_before: float = 0.0) -> dict:
+    """等任务跑完。
+
+    not_before 是发起请求的时刻：任务线程是异步启动的，刚 POST 完立刻查询
+    可能拿到上一次的旧 job（已 finished）而被误判为「已完成」，所以必须
+    等到 job.started_at 晚于请求时刻才算数。
+    """
     t0 = time.time()
     last = ""
     while time.time() - t0 < timeout:
@@ -65,7 +71,8 @@ def wait_job(doc_id: str, label: str, timeout: float = 14400) -> dict:
             last = line
         if job.get("error"):
             raise SystemExit(f"{label} 失败: {job['error']}")
-        if not job.get("running") and job:
+        started = job.get("started_at") or 0
+        if job and started >= not_before and not job.get("running"):
             return doc
         time.sleep(5)
     raise SystemExit(f"{label} 超时")
@@ -86,6 +93,8 @@ def main() -> int:
     ap.add_argument("--llm", default="")
     ap.add_argument("--no-polish", action="store_true")
     ap.add_argument("--no-kb", action="store_true")
+    ap.add_argument("--polish-only", action="store_true",
+                    help="跳过转写，只做清理+润色+知识库+导出")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--skip-existing", action="store_true", help="已有结果就跳过")
     args = ap.parse_args()
@@ -108,11 +117,14 @@ def main() -> int:
             print("  · 已有结果，跳过")
             continue
 
-        api("POST", "/api/transcribe", {
-            "id": doc_id, "name": src.name, "engine": args.engine,
-            "align": True, "rules": True, "force": args.force,
-        })
-        wait_job(doc_id, "转写")
+        if args.polish_only:
+            print("  · 仅润色模式：跳过转写", flush=True)
+        else:
+            api("POST", "/api/transcribe", {
+                "id": doc_id, "name": src.name, "engine": args.engine,
+                "align": True, "rules": True, "force": args.force,
+            })
+            wait_job(doc_id, "转写")
 
         # 用新代码做退化段落清理（服务里跑的是旧管线，这里补上）
         import subprocess
@@ -120,13 +132,15 @@ def main() -> int:
                        check=False, cwd=str(ROOT))
 
         if not args.no_polish:
+            t = time.time()
             api("POST", f"/api/doc/{urllib.parse.quote(doc_id)}/polish",
                 {"level": "standard", "backend": args.llm})
-            wait_job(doc_id, "润色")
+            wait_job(doc_id, "润色", not_before=t)
         if not args.no_kb:
+            t = time.time()
             api("POST", f"/api/doc/{urllib.parse.quote(doc_id)}/knowledge_base",
                 {"backend": args.llm})
-            wait_job(doc_id, "知识库")
+            wait_job(doc_id, "知识库", not_before=t)
         print(f"  → {export_txt(doc_id)}", flush=True)
 
     print("\n全部完成")
