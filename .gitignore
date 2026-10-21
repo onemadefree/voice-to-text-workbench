@@ -1,0 +1,18 @@
+# 虚拟环境与依赖
+.venv/
+__pycache__/
+*.pyc
+
+# 原始音频（体积大且属于素材，不入库）
+source/
+
+# 模型权重（用 scripts/fetch_models.py 下载）
+models/
+
+# 转写结果
+output/
+
+# 缓存与临时文件
+.cache/
+chunks/
+.DS_Store
