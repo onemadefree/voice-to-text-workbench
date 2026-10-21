@@ -29,7 +29,7 @@ config.ensure_dirs()
 app = FastAPI(title="本地语音转文字工作台", version="1.0")
 store = DocumentStore()
 
-from .pipeline import Pipeline  # noqa: E402  (循环导入规避)
+from .pipeline import Job, Pipeline  # noqa: E402  (循环导入规避)
 
 pipeline = Pipeline(store)
 
@@ -306,10 +306,11 @@ def run_polish(doc_id: str, payload: Dict[str, Any] = Body(default={})) -> Dict[
             return {"ok": True, "started": False, "message": "该文档已有任务在运行"}
 
     def runner():
-        job = pipeline.jobs.setdefault(doc_id, pipeline.Job(doc_id=doc_id))
+        job = Job(doc_id=doc_id)
         job.stage = "polishing"
         job.message = "本地 LLM 润色中" if not backend else f"{backend} 润色中"
         job.started_at = time.time()
+        pipeline.jobs[doc_id] = job
         try:
             pipeline.run_polish(doc_id, indices=idxs, level=level,
                                 force_polish=force, backend=backend)
@@ -338,10 +339,11 @@ def run_kb(doc_id: str, payload: Dict[str, Any] = Body(default={})) -> Dict[str,
     doc = _doc_or_404(doc_id)
 
     def runner():
-        job = pipeline.jobs.setdefault(doc_id, pipeline.Job(doc_id=doc_id))
+        job = Job(doc_id=doc_id)
         job.stage = "knowledge_base"
         job.message = "提炼知识库中"
         job.started_at = time.time()
+        pipeline.jobs[doc_id] = job
         try:
             pipeline.run_knowledge_base(doc_id, title=title, backend=backend)
             job.stage = "done"
