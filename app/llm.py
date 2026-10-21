@@ -11,6 +11,9 @@ import logging
 import os
 import re
 import threading
+import time
+import urllib.error
+import urllib.request
 from typing import Dict, List, Optional, Sequence
 
 from . import config
@@ -52,12 +55,55 @@ KB_SYSTEM = """你是一名内容编辑。你会收到一段演讲的整理稿�
 """
 
 
-def _build_client():
-    """返回 (generate_fn, 说明)。generate_fn(prompt, system) -> str"""
-    base = os.environ.get("STT_LLM_ENDPOINT", "").strip()
-    if base:
-        return _openai_client(base), f"openai-compatible:{base}"
+def _build_client(backend: Optional[str] = None):
+    """返回 (generate_fn, 说明)。generate_fn(prompt, system) -> str
 
+    backend:
+        None/local  → mlx-lm 本地推理（默认）
+        openai      → 通用 OpenAI 兼容接口（用 STT_LLM_API_* 配置）
+        minimax / deepseek / … → 预设的 OpenAI 兼容服务
+    """
+    name = (backend or config.LLM_BACKEND or "local").strip().lower()
+
+    if name in ("local", "mlx", "mlx-lm"):
+        return _build_local_client()
+
+    preset = config.LLM_PRESETS.get(name)
+    # 自定义 base 优先：配了 STT_LLM_API_BASE / STT_LLM_ENDPOINT 就用它，
+    # 此时模型名沿用预设或 STT_LLM_API_MODEL。
+    custom_base = (config.LLM_API_BASE or os.environ.get("STT_LLM_ENDPOINT", "").strip()).rstrip("/")
+    if custom_base:
+        model = config.LLM_API_MODEL or (preset or {}).get("model") or "local-model"
+        api_key = config.LLM_API_KEY or os.environ.get("STT_LLM_API_KEY", "")
+        if not api_key and not _is_local_endpoint(custom_base):
+            raise RuntimeError(
+                f"后端 {name} 需要 API Key：请设置 STT_LLM_API_KEY 环境变量"
+            )
+        return _openai_client(custom_base, api_key=api_key, model=model), f"openai:{custom_base}:{model}"
+
+    if preset:
+        base = preset["base"]
+        model = config.LLM_API_MODEL or preset["model"]
+        key_env = preset.get("key_env") or ""
+        api_key = config.LLM_API_KEY or (os.environ.get(key_env, "") if key_env else "")
+        if not api_key and not _is_local_endpoint(base):
+            raise RuntimeError(
+                f"后端 {name} 需要 API Key：请设置 {key_env or 'STT_LLM_API_KEY'} 环境变量"
+            )
+        return _openai_client(base, api_key=api_key, model=model), f"openai:{name}:{model}"
+
+    raise RuntimeError(
+        f"未知后端 {name}；可用：local、openai，或 {', '.join(config.LLM_PRESETS)}"
+    )
+
+
+def _is_local_endpoint(base: str) -> bool:
+    """本机服务（LM Studio / Ollama 等）不需要 API Key。"""
+    return any(h in base for h in ("127.0.0.1", "localhost", "0.0.0.0", "[::1]"))
+
+
+def _build_local_client():
+    """mlx-lm 本地推理。"""
     try:
         from mlx_lm import load as mlx_load, generate as mlx_generate  # type: ignore
         from mlx_lm.sample_utils import make_sampler  # type: ignore
@@ -108,32 +154,61 @@ def _build_client():
     return generate, f"mlx-lm:{config.LLM_MODEL}"
 
 
-def _openai_client(base: str):
-    from openai import OpenAI  # type: ignore
+def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
+    """任意 OpenAI 兼容服务（MiniMax / DeepSeek / 通义 / Kimi / 本地 server）。
 
-    client = OpenAI(base_url=base.rstrip("/") + "/v1", api_key="local")
+    只用标准库 urllib 实现，不引入额外依赖；带指数退避重试。
+    """
+    base_url = base.rstrip("/")
+    if not base_url.endswith("/v1") and "/v1" not in base_url:
+        base_url += "/v1"
+    url = base_url + "/chat/completions"
+    headers = {"Content-Type": "application/json", "User-Agent": "stt-workbench"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    retries = max(1, config.LLM_API_RETRIES)
 
     def generate(prompt: str, system: str, max_tokens: int = 2048, temperature: float = 0.3) -> str:
-        resp = client.chat.completions.create(
-            model=os.environ.get("STT_LLM_MODEL_NAME", "local-model"),
-            messages=[
+        body = json.dumps({
+            "model": model,
+            "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return resp.choices[0].message.content or ""
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }, ensure_ascii=False).encode("utf-8")
+        last = ""
+        for attempt in range(1, retries + 1):
+            try:
+                req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=config.LLM_API_TIMEOUT) as resp:
+                    data = json.loads(resp.read().decode("utf-8", "ignore"))
+                msg = (data.get("choices") or [{}])[0].get("message") or {}
+                # 推理型模型（如 MiniMax-M1/M2）正文可能落在 reasoning_content
+                text = (msg.get("content") or "").strip()
+                if not text:
+                    text = (msg.get("reasoning_content") or "").strip()
+                if text:
+                    return text
+                last = "空响应"
+            except Exception as exc:  # 网络抖动/限流 → 退避重试
+                last = f"{type(exc).__name__}: {exc}"
+                log.warning("LLM 调用失败（第 %d 次）: %s", attempt, last[:200])
+            if attempt < retries:
+                time.sleep(min(2 ** attempt, 10))
+        raise RuntimeError(f"LLM 调用失败：{last}")
 
     return generate
 
 
 class LocalLLM:
-    """线程安全的本地 LLM 包装。"""
+    """线程安全的 LLM 包装（本地 mlx-lm 或 OpenAI 兼容网络 API）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, backend: Optional[str] = None) -> None:
         self._generate = None
         self._info = ""
+        self._backend = backend
         self._lock = threading.Lock()
 
     @property
@@ -146,7 +221,7 @@ class LocalLLM:
         if self._generate is None:
             with self._lock:
                 if self._generate is None:
-                    self._generate, self._info = _build_client()
+                    self._generate, self._info = _build_client(self._backend)
 
     def complete(self, prompt: str, system: str, max_tokens: int = 2048, temperature: float = 0.3) -> str:
         self._ensure()

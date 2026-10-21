@@ -118,8 +118,40 @@ def health() -> Dict[str, Any]:
         "output_dir": str(config.OUTPUT_DIR),
         "asr_model": config.ASR_MODEL,
         "llm_model": config.LLM_MODEL,
+        "llm_backend": config.LLM_BACKEND,
         "language": config.ASR_LANGUAGE,
     }
+
+
+@app.get("/api/llm/backends")
+def llm_backends() -> Dict[str, Any]:
+    """可用的润色/知识库后端。key_env 有值且已配置环境变量 → 标记为就绪。"""
+    items = [{
+        "id": "local",
+        "label": f"本地 {config.LLM_MODEL}（默认，离线）",
+        "ready": True,
+    }]
+    for key, preset in config.LLM_PRESETS.items():
+        key_env = preset.get("key_env") or ""
+        ready = True
+        if key_env:
+            ready = bool(os.environ.get(key_env) or config.LLM_API_KEY)
+        items.append({
+            "id": key,
+            "label": preset.get("label") or key,
+            "model": preset.get("model"),
+            "ready": ready,
+            "key_env": key_env or None,
+        })
+    if config.LLM_API_BASE:
+        items.append({
+            "id": "openai",
+            "label": f"自定义 OpenAI 兼容：{config.LLM_API_BASE}",
+            "model": config.LLM_API_MODEL or "local-model",
+            "ready": bool(config.LLM_API_KEY),
+            "key_env": "STT_LLM_API_KEY",
+        })
+    return {"default": config.LLM_BACKEND, "backends": items}
 
 
 @app.get("/api/files")
@@ -266,6 +298,7 @@ def run_polish(doc_id: str, payload: Dict[str, Any] = Body(default={})) -> Dict[
     idxs = [int(i) for i in indices] if isinstance(indices, list) else None
     level = str(payload.get("level") or "standard")
     force = bool(payload.get("force", False))
+    backend = str(payload.get("backend") or "").strip() or None
 
     with pipeline._lock:
         running = pipeline.jobs.get(doc_id)
@@ -275,10 +308,11 @@ def run_polish(doc_id: str, payload: Dict[str, Any] = Body(default={})) -> Dict[
     def runner():
         job = pipeline.jobs.setdefault(doc_id, pipeline.Job(doc_id=doc_id))
         job.stage = "polishing"
-        job.message = "本地 LLM 润色中"
+        job.message = "本地 LLM 润色中" if not backend else f"{backend} 润色中"
         job.started_at = time.time()
         try:
-            pipeline.run_polish(doc_id, indices=idxs, level=level, force_polish=force)
+            pipeline.run_polish(doc_id, indices=idxs, level=level,
+                                force_polish=force, backend=backend)
             job.stage = "done"
             job.message = "润色完成"
         except Exception as exc:
@@ -300,6 +334,7 @@ def run_polish(doc_id: str, payload: Dict[str, Any] = Body(default={})) -> Dict[
 def run_kb(doc_id: str, payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     """后台启动知识库提炼，立即返回。"""
     title = str(payload.get("title") or "")
+    backend = str(payload.get("backend") or "").strip() or None
     doc = _doc_or_404(doc_id)
 
     def runner():
@@ -308,7 +343,7 @@ def run_kb(doc_id: str, payload: Dict[str, Any] = Body(default={})) -> Dict[str,
         job.message = "提炼知识库中"
         job.started_at = time.time()
         try:
-            pipeline.run_knowledge_base(doc_id, title=title)
+            pipeline.run_knowledge_base(doc_id, title=title, backend=backend)
             job.stage = "done"
             job.message = "知识库完成"
         except Exception as exc:

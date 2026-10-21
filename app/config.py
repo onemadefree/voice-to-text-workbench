@@ -23,6 +23,63 @@ ALIGNER_MODEL = os.environ.get("STT_ALIGNER_MODEL", "mlx-community/Qwen3-ForcedA
 # 后处理用本地 LLM
 LLM_MODEL = os.environ.get("STT_LLM_MODEL", "mlx-community/Qwen3-8B-4bit")
 
+# ---------------------------------------------------------------- 润色后端
+# local  = mlx-lm 本地推理（默认，全离线）
+# openai = 任意 OpenAI 兼容网络 API；也可直接用下面的预设名（minimax/deepseek/…）
+LLM_BACKEND = os.environ.get("STT_LLM_BACKEND", "local")
+# OpenAI 兼容接口的自定义参数（预设名未覆盖时生效）
+LLM_API_BASE = os.environ.get("STT_LLM_API_BASE", "")
+LLM_API_KEY = os.environ.get("STT_LLM_API_KEY", "")
+LLM_API_MODEL = os.environ.get("STT_LLM_API_MODEL", "")
+LLM_API_TIMEOUT = float(os.environ.get("STT_LLM_API_TIMEOUT", "180"))
+LLM_API_RETRIES = int(os.environ.get("STT_LLM_API_RETRIES", "3"))
+
+# 常见 OpenAI 兼容服务预设：设 STT_LLM_BACKEND=minimax 即可切换
+LLM_PRESETS: dict = {
+    "minimax": {
+        "base": "https://api.minimax.chat/v1",
+        "model": "MiniMax-Text-01",
+        "key_env": "MINIMAX_API_KEY",
+        "label": "MiniMax（国内 api.minimax.chat）",
+    },
+    "minimax-intl": {
+        "base": "https://api.minimaxi.com/v1",
+        "model": "MiniMax-Text-01",
+        "key_env": "MINIMAX_API_KEY",
+        "label": "MiniMax（国际 api.minimaxi.com）",
+    },
+    "deepseek": {
+        "base": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "key_env": "DEEPSEEK_API_KEY",
+        "label": "DeepSeek",
+    },
+    "dashscope": {
+        "base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+        "key_env": "DASHSCOPE_API_KEY",
+        "label": "阿里云百炼（通义千问）",
+    },
+    "kimi": {
+        "base": "https://api.moonshot.cn/v1",
+        "model": "moonshot-v1-32k",
+        "key_env": "MOONSHOT_API_KEY",
+        "label": "Kimi（月之暗面）",
+    },
+    "openai": {
+        "base": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+        "key_env": "OPENAI_API_KEY",
+        "label": "OpenAI",
+    },
+    "local-openai": {
+        "base": "http://127.0.0.1:1234/v1",
+        "model": "local-model",
+        "key_env": "",
+        "label": "本地 OpenAI 兼容服务（LM Studio / Ollama / llama.cpp）",
+    },
+}
+
 ASR_LANGUAGE = os.environ.get("STT_LANG", "Chinese")
 
 # ---------------------------------------------------------------- 音频

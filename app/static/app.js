@@ -67,6 +67,23 @@ async function init() {
   $('sourceDir').textContent = health.source_dir;
   $('sourceDir').title = health.source_dir;
 
+  // 润色后端下拉：本地默认，其余为可选的网络 API
+  try {
+    const bl = await api('/api/llm/backends');
+    const sel = $('llmSel');
+    sel.innerHTML = '';
+    for (const b of bl.backends) {
+      const opt = document.createElement('option');
+      opt.value = b.id;
+      opt.textContent = b.label + (b.ready ? '' : '（未配置 Key）');
+      opt.disabled = !b.ready;
+      if (b.id === 'local') opt.textContent = b.label;
+      sel.appendChild(opt);
+    }
+    sel.value = bl.backends.some(b => b.id === bl.default && b.ready) ? bl.default : 'local';
+    sel.onchange = () => toast(`润色后端：${sel.options[sel.selectedIndex].text}`);
+  } catch (e) { /* 后端列表拿不到就用默认本地 */ }
+
   $('audio').addEventListener('timeupdate', onTimeUpdate);
   $('audio').addEventListener('loadedmetadata', () => {
     $('timeDur').textContent = fmtTs($('audio').duration);
@@ -562,11 +579,12 @@ async function runRules() {
 
 async function polish(indices) {
   if (!state.docId) return;
-  const label = indices ? `已提交润色 ${indices.length} 段` : '已提交全篇润色（本地 LLM）';
+  const backend = ($('llmSel') && $('llmSel').value) || '';
+  const label = indices ? `已提交润色 ${indices.length} 段` : '已提交全篇润色';
   toast(label + '…');
   try {
     await api(`/api/doc/${encodeURIComponent(state.docId)}/polish`, {
-      method: 'POST', body: JSON.stringify({ indices, level: 'standard' }),
+      method: 'POST', body: JSON.stringify({ indices, level: 'standard', backend }),
     });
     state.pollingJob = true;
     startPolling();
@@ -576,10 +594,11 @@ async function polish(indices) {
 
 async function buildKB() {
   if (!state.docId) return;
+  const backend = ($('llmSel') && $('llmSel').value) || '';
   toast('已提交知识库提炼任务…');
   try {
     await api(`/api/doc/${encodeURIComponent(state.docId)}/knowledge_base`, {
-      method: 'POST', body: JSON.stringify({}),
+      method: 'POST', body: JSON.stringify({ backend }),
     });
     state.pollingJob = true;
     startPolling();

@@ -23,7 +23,10 @@
       </select>
       <button id="btnTranscribe" class="primary">开始转写</button>
       <button id="btnRules" title="去语气词/口水词">规则清理</button>
-      <button id="btnPolishAll" title="本地 LLM 纠错 + 润色全篇">AI 润色全篇</button>
+      <select id="llmSel" title="润色/知识库使用的模型后端">
+        <option value="">润色后端：本地</option>
+      </select>
+      <button id="btnPolishAll" title="LLM 纠错 + 润色全篇">AI 润色全篇</button>
       <button id="btnKB" title="提炼知识库资料">生成知识库</button>
       <div class="dropdown">
         <button id="btnExport">导出 ▾</button>

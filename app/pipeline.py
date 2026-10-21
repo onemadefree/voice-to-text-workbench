@@ -93,7 +93,12 @@ class Pipeline:
         with self._lock:
             return self.jobs.get(doc_id)
 
-    def get_llm(self):
+    def get_llm(self, backend: Optional[str] = None):
+        """取 LLM 客户端。backend 为 None 时用默认（本地 mlx-lm）。"""
+        if backend:
+            from .llm import LocalLLM
+
+            return LocalLLM(backend=backend)
         if self._llm is None:
             from .llm import LocalLLM
 
@@ -309,9 +314,12 @@ class Pipeline:
         use_context: bool = True,
         group_size: int = 96,
         force_polish: bool = False,
+        backend: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """用本地 LLM 对指定段落（默认全部）做纠错+润色。
+        """用 LLM 对指定段落（默认全部）做纠错+润色。
 
+        backend=None 用默认后端（本地 mlx-lm）；也可传 "minimax"/"deepseek" 等
+        预设名或 "openai"（配合 STT_LLM_API_* 配置）。
         按 group_size 分组处理并逐组落盘，中途失败不会丢掉已完成的部分。
         """
         doc = self.store.load(doc_id)
@@ -329,7 +337,7 @@ class Pipeline:
         if not idxs:
             return doc
 
-        llm = self.get_llm()
+        llm = self.get_llm(backend)
         from .llm import polish_segments
 
         for g_start in range(0, len(idxs), group_size):
@@ -359,7 +367,8 @@ class Pipeline:
         doc.pop("polish_progress", None)
         return self.store.save(doc)
 
-    def run_knowledge_base(self, doc_id: str, title: str = "") -> Optional[Dict[str, Any]]:
+    def run_knowledge_base(self, doc_id: str, title: str = "",
+                           backend: Optional[str] = None) -> Optional[Dict[str, Any]]:
         doc = self.store.load(doc_id)
         if doc is None:
             return None
@@ -369,7 +378,8 @@ class Pipeline:
             return doc
         from .llm import build_knowledge_base
 
-        kb = build_knowledge_base(self.get_llm(), text, title=title or doc.get("source", ""))
+        kb = build_knowledge_base(self.get_llm(backend), text,
+                                  title=title or doc.get("source", ""))
         doc["knowledge_base"] = kb
         return self.store.save(doc)
 

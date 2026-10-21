@@ -44,8 +44,10 @@ def main() -> int:
     ap.add_argument("--lang", default=None, help="语言，默认 Chinese")
     ap.add_argument("--no-align", action="store_true", help="不做词级强制对齐")
     ap.add_argument("--rules", default="light", choices=["none", "light", "standard"])
-    ap.add_argument("--polish", action="store_true", help="转写后跑本地 LLM 润色")
+    ap.add_argument("--polish", action="store_true", help="转写后跑 LLM 润色")
     ap.add_argument("--kb", action="store_true", help="生成知识库资料")
+    ap.add_argument("--llm", default=None,
+                    help="润色后端：local（默认）/ openai / minimax / deepseek / dashscope / kimi")
     ap.add_argument("--force", action="store_true", help="重新转写")
     ap.add_argument("--hotwords", default="", help="热词，逗号分隔")
     args = ap.parse_args()
@@ -99,13 +101,14 @@ def main() -> int:
             print(f"  ✓ 规则清理（{args.rules}）")
 
         if args.polish:
-            print("  … LLM 润色中")
-            pipeline.run_polish(doc_id, level=args.rules if args.rules != "none" else "standard")
+            print(f"  … LLM 润色中（{args.llm or 'local'}）", flush=True)
+            pipeline.run_polish(doc_id, level=args.rules if args.rules != "none" else "standard",
+                                backend=args.llm)
             print("  ✓ 润色完成")
 
         if args.kb:
-            print("  … 知识库提炼中")
-            pipeline.run_knowledge_base(doc_id, title=src.stem)
+            print(f"  … 知识库提炼中（{args.llm or 'local'}）", flush=True)
+            pipeline.run_knowledge_base(doc_id, title=src.stem, backend=args.llm)
             print("  ✓ 知识库完成")
 
         doc = store.load(doc_id) or {}
