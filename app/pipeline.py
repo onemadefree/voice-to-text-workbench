@@ -229,6 +229,13 @@ class Pipeline:
             log.info("去除重复段落 %d 条", len(segments) - len(deduped))
         segments = deduped
 
+        # ---- 清理退化段落（零时长 + 幻觉重复串）
+        clean = _drop_degenerate(segments)
+        if len(clean) != len(segments):
+            log.info("清理退化段落 %d 条", len(segments) - len(clean))
+        segments = clean
+        doc["segments"] = segments  # 后续规则清理/润色都基于这份列表
+
         # ---- 规则清理
         if use_rules:
             job.stage = "cleaning"
@@ -394,6 +401,136 @@ def _dedupe_segments(segments: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]
         out.append(seg)
     for i, seg in enumerate(out):
         seg["id"] = i
+    return out
+
+
+_HALLUC_RE = re.compile(r"[\s，。！？、；：,.!?;:\"'“”‘’（）()《》…·—\-~·]+")
+
+
+def _strip_punct(text: str) -> str:
+    return _HALLUC_RE.sub("", text or "")
+
+
+def _is_hallucination(text: str) -> bool:
+    """判断是否为 ASR 幻觉串。
+
+    静音/噪声段里模型会反复吐同一句话（"一，一，一，…"或"就我这个事儿，
+    就我这个事儿，…"），文本成倍冗余。判据：去掉标点后，尾部是某个 1~8 字
+    单元的整倍重复（单字重复 3 次起，多字单元 4 次起，避免误伤口语复述）。
+    """
+    chars = _strip_punct(text)
+    if len(chars) < 3:
+        return False
+    for unit in range(1, 9):
+        k = len(chars) // unit
+        need = 3 if unit == 1 else 4
+        if k < need or (unit >= 2 and len(chars) < 8):
+            continue
+        if chars[-unit * k:] == chars[-unit:] * k:
+            return True
+    return False
+
+
+def _interpolate_missing_times(segments: List[Dict[str, Any]]) -> None:
+    """给「有文字但零时长」的段落补出时间跨度。
+
+    对齐器在部分区域会给出零跨度，但文字是真实口语，不能丢。按前后
+    有时间的邻居之间的空隙、按字数比例分配，让时间轴继续单调可用。
+    """
+    n = len(segments)
+    i = 0
+    while i < n:
+        if segments[i].get("end", 0.0) - segments[i].get("start", 0.0) > 0.01:
+            i += 1
+            continue
+        j = i
+        while (j < n and segments[j].get("end", 0.0) - segments[j].get("start", 0.0) <= 0.01):
+            j += 1
+        # 前一个已知时间的段落
+        prev_end = segments[i - 1]["end"] if i > 0 else None
+        # 后一个已知时间的段落
+        next_start = segments[j]["start"] if j < n else None
+        run = segments[i:j]
+        weights = [max(1, len(_strip_punct(s.get("raw") or ""))) for s in run]
+        total_w = sum(weights) or 1
+        if prev_end is not None and next_start is not None and next_start > prev_end:
+            gap = next_start - prev_end
+            cur = prev_end
+            for s, w in zip(run, weights):
+                span = gap * w / total_w
+                s["start"], s["end"] = cur, cur + span
+                cur += span
+        elif prev_end is not None:
+            cur = prev_end
+            for s, w in zip(run, weights):
+                span = max(0.3, w * 0.22)
+                s["start"], s["end"] = cur, cur + span
+                cur += span
+        elif next_start is not None:
+            cur = next_start
+            for s, w in zip(run, weights):
+                span = max(0.3, w * 0.22)
+                s["start"], s["end"] = cur - span, cur
+                cur -= span
+        i = j
+
+
+def _drop_degenerate(segments: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """丢掉退化段落，并给零时长的真实内容补时间。
+
+    三类要丢：
+    1. 重复幻觉串——模型在静音区自问自答（"一，一，一，…"）；
+    2. 零时长的对齐噪声——只剩 "嗯。"、"”" 这类语气碎片；
+    3. 连续退化区——成片的同质碎片（模型卡住刷"线，线，…"），整片丢弃。
+    零时长但有实义的口语保留，并按邻居空隙插值补时间。
+    这类段落若不清理，会把段数放大数倍（实测 11000 段 → 2700 段），
+    后续 LLM 润色会大量浪费时间并产出垃圾。
+    """
+    out: List[Dict[str, Any]] = []
+    for seg in segments:
+        raw = seg.get("raw") or ""
+        if _is_hallucination(raw):
+            continue
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", 0.0))
+        if end - start <= 0.01 and len(_strip_punct(raw)) <= 2:
+            continue
+        out.append(seg)
+
+    # 按时间排序：退化区里对齐器会给出乱序的时间戳
+    out.sort(key=lambda s: (float(s.get("start", 0.0)), float(s.get("end", 0.0))))
+    out = _drop_degenerate_regions(out)
+    _interpolate_missing_times(out)
+    for i, seg in enumerate(out):
+        seg["id"] = i
+    return out
+
+
+def _drop_degenerate_regions(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """整片丢弃「同质碎片」连续区（模型卡在同一个字上刷不出内容）。
+
+    判据：按时间相邻的若干段，文字去掉标点后只有 <=2 种字、且每段都很短，
+    连续达到 5 段以上即视为退化区（实测出现过 5 分半的连续刷屏）。
+    """
+    out: List[Dict[str, Any]] = []
+    run: List[Dict[str, Any]] = []
+
+    def flush() -> None:
+        nonlocal run
+        if len(run) < 5:
+            out.extend(run)
+        run = []
+
+    for seg in segments:
+        txt = _strip_punct(seg.get("raw") or "")
+        span = float(seg.get("end", 0.0)) - float(seg.get("start", 0.0))
+        homogeneous = bool(txt) and len(set(txt)) <= 2 and span <= 1.5
+        if homogeneous:
+            run.append(seg)
+        else:
+            flush()
+            out.append(seg)
+    flush()
     return out
 
 
