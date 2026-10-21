@@ -22,6 +22,8 @@ from .store import DocumentStore, new_document, segment_final_text
 log = logging.getLogger("stt.pipeline")
 
 SENT_PUNCT = "。！？!?…"
+# 单块切出的段数上限：正常 30 秒块约 10~20 段，超过说明对齐器在幻觉文本上打转
+MAX_SEGMENTS_PER_CHUNK = int(os.environ.get("STT_MAX_SEG_PER_CHUNK", "40"))
 
 
 # ---------------------------------------------------------------- 任务管理
@@ -151,7 +153,11 @@ class Pipeline:
         # ---- 切段
         job.stage = "segmenting"
         job.message = "静音检测与分段"
-        silences = A.detect_silence(wav)
+        noise_db = None
+        if config.SILENCE_ADAPTIVE:
+            noise_db = A.adaptive_silence_db(wav)
+            log.info("自适应静音阈值 %.1f dB", noise_db)
+        silences = A.detect_silence(wav, noise_db=noise_db)
         regions = A.speech_regions(silences, info.duration)
         chunks = A.chunk_regions(regions, silences, config.SEG_MAX_SECONDS, config.SEG_MIN_MERGE)
         total = len(chunks)
@@ -162,6 +168,7 @@ class Pipeline:
             "aligned": bool(align),
             "chunk_count": total,
             "hotwords": list(hotwords or []),
+            "silence_db": noise_db if noise_db is not None else config.SILENCE_NOISE_DB,
         }
         self.store.save(doc)
 
@@ -203,8 +210,17 @@ class Pipeline:
                 try:
                     res = asr.transcribe(chunk_wav, offset=0.0)
                     text = res.text
+                    # 整块刷屏（模型在非语音区原地循环）→ 整块丢弃
+                    if _chunk_is_hallucination(text):
+                        log.info("块 %d（%.1f-%.1fs）识别结果重复，整块丢弃", idx, start, end)
+                        continue
                     words = asr.align(chunk_wav, text, offset=0.0) if align else None
-                    for seg in self._split_into_segments(text, words, start, end):
+                    segs = self._split_into_segments(text, words, start, end)
+                    # 段数异常（对齐器在幻觉文本上打转）→ 丢弃
+                    if len(segs) > MAX_SEGMENTS_PER_CHUNK:
+                        log.info("块 %d 切出 %d 段（异常），丢弃", idx, len(segs))
+                        segs = []
+                    for seg in segs:
                         seg["chunk"] = idx
                         segments.append(seg)
                 finally:
@@ -483,6 +499,40 @@ def _interpolate_missing_times(segments: List[Dict[str, Any]]) -> None:
                 s["start"], s["end"] = cur - span, cur
                 cur -= span
         i = j
+
+
+def _chunk_is_hallucination(text: str, min_coverage: float = 0.6) -> bool:
+    """整块文本是否是模型的重复刷屏。
+
+    段级判据可能漏掉「换了个字继续刷」的情况（实测 0.6B 刷「线」、1.7B 刷
+    「的，圆的」），所以在块级再判一次：文本后缀是某个 1~12 字单元的整倍
+    重复，且重复部分覆盖整块文本的 60% 以上 → 整块丢弃，不进后续润色。
+
+    重复串前面常夹着正常内容（「报了的没有没有没有拿单子的没有没有…」），
+    所以不能只比对「整块 = 单元×N」；这里先做必要条件（末尾 4 个单元必须
+    干净），再从大到小找最大的干净后缀。
+
+    阈值取 60%：口语里真的会重复（「左路，左路，左路」），覆盖率太低会
+    误伤真人说的话；覆盖率够高的刷屏段由段数护栏（MAX_SEGMENTS_PER_CHUNK）
+    兜底。
+    """
+    chars = _strip_punct(text)
+    if len(chars) < 12:
+        return False
+    for unit in range(1, 13):
+        if len(chars) < 4 * unit:
+            continue
+        unit_str = chars[-unit:]
+        # 必要条件：末尾 4 个单元必须已经是干净重复
+        if chars[-4 * unit:] != unit_str * 4:
+            continue
+        for k in range(len(chars) // unit, 3, -1):
+            rep = unit * k
+            if rep / len(chars) < min_coverage:
+                break
+            if chars[-rep:] == unit_str * k:
+                return True
+    return False
 
 
 def _drop_degenerate(segments: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:

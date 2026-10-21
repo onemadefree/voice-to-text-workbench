@@ -11,7 +11,7 @@ import struct
 import subprocess
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 from . import config
 
@@ -80,6 +80,62 @@ def to_wav16k(src: Path, dst: Path) -> Path:
         "-c:a", "pcm_s16le", str(dst),
     ])
     return dst
+
+
+def level_profile(wav: Path, block_sec: float = 1.0) -> Dict[str, float]:
+    """统计 16k 单声道 wav 的逐块 RMS（dB）分布。
+
+    不同录音的响度差别很大（实测 11 dB），固定静音阈值对某些文件会误切
+    轻声说话、对另一些文件又切不掉噪声。用本文件的分布自适应定阈值。
+    块长取 1 秒：silencedetect 是在细粒度上判静音，用 1 秒块才能代表
+    「有人说话」时的实际电平。
+    """
+    import math
+    import wave
+
+    import numpy as np
+
+    block = int(config.SAMPLE_RATE * block_sec)
+    levels: List[float] = []
+    with wave.open(str(wav), "rb") as w:
+        while True:
+            data = w.readframes(block)
+            if not data:
+                break
+            x = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
+            if x.size == 0:
+                continue
+            rms = float(np.sqrt((x.astype(np.float64) ** 2).mean() + 1e-12))
+            levels.append(20 * math.log10(rms))
+    if not levels:
+        return {}
+    arr = np.array(levels)
+    return {
+        "p10": float(np.percentile(arr, 10)),
+        "p25": float(np.percentile(arr, 25)),
+        "p50": float(np.percentile(arr, 50)),
+        "p75": float(np.percentile(arr, 75)),
+        "p90": float(np.percentile(arr, 90)),
+        "max": float(arr.max()),
+    }
+
+
+def adaptive_silence_db(wav: Path) -> float:
+    """按本文件的响度分布推静音阈值（dB）。
+
+    p25 近似噪声底，p75 近似语音电平，阈值取两者之间偏噪声底一侧
+    （SILENCE_OFFSET 是「从噪声底往语音方向走」的比例，0.4 ≈ 噪声底 +40% 行程）。
+    再夹到 [SILENCE_MIN_DB, SILENCE_MAX_DB] 防止离谱。
+    """
+    profile = level_profile(wav)
+    if not profile:
+        return config.SILENCE_NOISE_DB
+    floor = profile["p25"]
+    speech = profile["p75"]
+    ratio = min(max(config.SILENCE_OFFSET, 0.0), 1.0)
+    thr = floor + ratio * (speech - floor)
+    thr = max(config.SILENCE_MIN_DB, min(config.SILENCE_MAX_DB, thr))
+    return round(thr, 1)
 
 
 def detect_silence(src: Path, noise_db: float | None = None, min_sec: float | None = None) -> List[Tuple[float, float]]:

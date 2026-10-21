@@ -92,6 +92,13 @@ SEG_MIN_MERGE = float(os.environ.get("STT_SEG_MIN_MERGE", "9"))
 # 静音检测阈值（秒 / dB）
 SILENCE_MIN_SEC = float(os.environ.get("STT_SILENCE_MIN", "0.45"))
 SILENCE_NOISE_DB = float(os.environ.get("STT_SILENCE_DB", "-32"))
+# 按文件自适应：阈值 = 噪声底(p25) + SILENCE_OFFSET × (语音电平(p75) − 噪声底)，
+# 再夹到 [SILENCE_MIN_DB, SILENCE_MAX_DB]。各录音响度实测相差 11 dB，
+# 固定阈值必然对某些文件失效（轻声文件被误切 / 吵杂文件切不干净）。
+SILENCE_ADAPTIVE = os.environ.get("STT_SILENCE_ADAPTIVE", "1") not in ("0", "false", "no")
+SILENCE_OFFSET = float(os.environ.get("STT_SILENCE_OFFSET", "0.55"))
+SILENCE_MIN_DB = float(os.environ.get("STT_SILENCE_MIN_DB", "-48"))
+SILENCE_MAX_DB = float(os.environ.get("STT_SILENCE_MAX_DB", "-28"))
 # 两段语音之间的最短停顿（秒），短于此则合并
 MIN_GAP_MERGE = float(os.environ.get("STT_MIN_GAP", "0.35"))
 
