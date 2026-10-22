@@ -222,7 +222,22 @@ def _build_local_client():
     def generate(prompt: str, system: str, max_tokens: int = 2048, temperature: float = 0.3) -> str:
         if state.get("model") is None:
             log.info("加载 LLM: %s", config.LLM_MODEL)
-            model, tokenizer = mlx_load(config.local_model(config.LLM_MODEL))
+            # 先清掉 mlx 分配器缓存：转写用的 ASR 模型刚释放，缓存不回收的话
+            # 16GB 机器上再加载 8B 润色模型会分配失败。
+            try:
+                import mlx.core as mx  # type: ignore
+
+                mx.clear_cache()
+            except Exception:  # pragma: no cover
+                pass
+            try:
+                model, tokenizer = mlx_load(config.local_model(config.LLM_MODEL))
+            except Exception as exc:
+                raise RuntimeError(
+                    f"加载本地润色模型失败：{exc}。"
+                    "若提示内存不足，多半是转写模型还占着显存——"
+                    "重启服务后再润色，或改用网络 API（界面「⚙️ 模型设置」）。"
+                ) from exc
             state["model"] = model
             state["tokenizer"] = tokenizer
         sampler = make_sampler(temp=temperature)

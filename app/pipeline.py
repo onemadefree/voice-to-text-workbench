@@ -50,7 +50,7 @@ class Pipeline:
         self.jobs: Dict[str, Job] = {}
         self._lock = threading.RLock()
         self._threads: Dict[str, threading.Thread] = {}
-        self._llm = None
+        self._llms: Dict[str, object] = {}
 
     # ------------------------------------------------------------ 公共入口
     def start_transcribe(
@@ -95,17 +95,37 @@ class Pipeline:
         with self._lock:
             return self.jobs.get(doc_id)
 
-    def get_llm(self, backend: Optional[str] = None):
-        """取 LLM 客户端。backend 为 None 时用默认（本地 mlx-lm）。"""
+    @staticmethod
+    def _llm_key(backend: Optional[str]) -> str:
+        """把后端名归一化成缓存键：None 与 local/mlx 指向同一个实例。"""
         if backend:
-            from .llm import LocalLLM
+            name = str(backend).strip().lower()
+        else:
+            from .llm import load_user_config
 
-            return LocalLLM(backend=backend)
-        if self._llm is None:
-            from .llm import LocalLLM
+            name = str(load_user_config().get("backend") or config.LLM_BACKEND or "local").strip().lower()
+        return "local" if name in ("", "local", "mlx", "mlx-lm") else name
 
-            self._llm = LocalLLM()
-        return self._llm
+    def get_llm(self, backend: Optional[str] = None):
+        """取 LLM 客户端（按后端缓存实例）。
+
+        同一后端必须复用同一个对象：本地 mlx 每次新建实例都会重新加载一遍
+        8B 权重，16GB 机器上同时存在两份就会内存不足（润色报错）。
+        """
+        key = self._llm_key(backend)
+        with self._lock:
+            llm = self._llms.get(key)
+            if llm is None:
+                from .llm import LocalLLM
+
+                llm = LocalLLM(backend=backend)
+                self._llms[key] = llm
+            return llm
+
+    def reset_llm_cache(self) -> None:
+        """丢弃已缓存的 LLM 实例（改了后端配置后调用，顺带释放显存）。"""
+        with self._lock:
+            self._llms.clear()
 
     # ------------------------------------------------------------ 转写主体
     def _transcribe(

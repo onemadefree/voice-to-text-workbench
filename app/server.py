@@ -160,8 +160,10 @@ def save_llm_config(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any
 
     if payload.get("clear"):
         clear_user_config()
+        pipeline.reset_llm_cache()
         return {"ok": True, "cleared": True, "message": "已清除在线模型配置"}
     saved = save_user_config(payload)
+    pipeline.reset_llm_cache()
     return {"ok": True, "saved": True,
             "backend": saved.get("backend", ""),
             "has_key": bool(saved.get("api_key")),

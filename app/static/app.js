@@ -698,18 +698,18 @@ async function pollStatus() {
       wrap.classList.add('hidden');
     }
 
-    if (doc.status === 'ready' && state.pollingJob) {
+    // 只有任务真正结束才收尾：润色/知识库不改变 doc.status，
+    // 只看 job.running，否则会在任务还在跑的时候就误报「处理完成」并停止轮询。
+    if (state.pollingJob && !busy) {
       state.pollingJob = false;
       stopPolling();
-      await reloadDoc();
-      toast('处理完成');
+      if (job && job.stage === 'error') {
+        toast('任务失败: ' + (job.error || '未知错误'));
+      } else {
+        await reloadDoc();
+        toast('处理完成');
+      }
       await loadFiles();
-      return;
-    }
-    if (job && job.stage === 'error') {
-      state.pollingJob = false;
-      stopPolling();
-      toast('任务失败: ' + (job.error || ''));
       return;
     }
     if (doc.segments && doc.segments.length !== (state.doc?.segments?.length || 0)) {
