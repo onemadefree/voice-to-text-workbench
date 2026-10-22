@@ -14,7 +14,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from . import config
 
@@ -55,46 +55,130 @@ KB_SYSTEM = """你是一名内容编辑。你会收到一段演讲的整理稿�
 """
 
 
-def _build_client(backend: Optional[str] = None):
+def _user_config_path():
+    """界面里保存的在线模型配置（存本地，不进 git）。"""
+    return config.CACHE_DIR / "llm_config.json"
+
+
+def load_user_config() -> Dict[str, str]:
+    """读取界面保存的在线模型配置。"""
+    p = _user_config_path()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return {k: str(v) for k, v in data.items() if isinstance(v, (str, int, float))}
+    except Exception:
+        return {}
+
+
+def save_user_config(data: Dict[str, Any]) -> Dict[str, str]:
+    """保存界面填写的在线模型配置（Key 只落本地文件，权限 600）。"""
+    clean: Dict[str, str] = {}
+    for k in ("backend", "base", "model", "api_key"):
+        v = str(data.get(k) or "").strip()
+        if v:
+            clean[k] = v
+    # Key 留空表示「不修改」：界面不回显明文，避免误清已保存的 Key
+    if "api_key" not in clean:
+        old = load_user_config().get("api_key")
+        if old:
+            clean["api_key"] = old
+    p = _user_config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8")
+    try:
+        p.chmod(0o600)
+    except Exception:
+        pass
+    return clean
+
+
+def clear_user_config() -> None:
+    p = _user_config_path()
+    if p.exists():
+        p.unlink()
+
+
+def describe_backends() -> List[Dict[str, Any]]:
+    """可用后端清单：本地 + 预设 + 界面自定义。"""
+    user = load_user_config()
+    items: List[Dict[str, Any]] = [{
+        "id": "local",
+        "label": f"本地 {config.LLM_MODEL}（默认，离线）",
+        "model": config.LLM_MODEL,
+        "ready": True,
+    }]
+    for key, preset in config.LLM_PRESETS.items():
+        key_env = preset.get("key_env") or ""
+        ready = bool(user.get("api_key") if user.get("backend") == key
+                     else os.environ.get(key_env) or config.LLM_API_KEY)
+        items.append({
+            "id": key,
+            "label": preset.get("label") or key,
+            "base": preset.get("base"),
+            "model": preset.get("model"),
+            "key_env": key_env or None,
+            "ready": ready,
+        })
+    if user.get("base"):
+        items.append({
+            "id": "custom",
+            "label": f"自定义 OpenAI 兼容：{user['base']}",
+            "base": user.get("base"),
+            "model": user.get("model") or "local-model",
+            "ready": bool(user.get("api_key")),
+            "key_env": None,
+        })
+    return items
+
+
+def _resolve_online(name: str, override: Optional[Dict[str, str]] = None) -> tuple[str, str, str]:
+    """解析在线后端的 (base, model, api_key)。
+
+    优先级：override（界面未保存的测试值）→ 界面保存的用户配置 → 环境变量 → 预设默认值。
+    """
+    user = load_user_config()
+    preset = config.LLM_PRESETS.get(name) or {}
+    using_user = user.get("backend") == name
+    ov = override or {}
+
+    base = (ov.get("base") or "") or (user.get("base") if using_user else "") or config.LLM_API_BASE \
+        or os.environ.get("STT_LLM_ENDPOINT", "").strip() or preset.get("base", "")
+    model = (ov.get("model") or "") or (user.get("model") if using_user else "") or config.LLM_API_MODEL \
+        or preset.get("model", "local-model")
+    key_env = preset.get("key_env") or ""
+    key = (ov.get("api_key") or "") or (user.get("api_key") if using_user else "") or config.LLM_API_KEY \
+        or (os.environ.get(key_env, "") if key_env else "")
+    return base.rstrip("/"), model, key
+
+
+def _build_client(backend: Optional[str] = None, override: Optional[Dict[str, str]] = None):
     """返回 (generate_fn, 说明)。generate_fn(prompt, system) -> str
 
     backend:
         None/local  → mlx-lm 本地推理（默认）
-        openai      → 通用 OpenAI 兼容接口（用 STT_LLM_API_* 配置）
+        openai      → 通用 OpenAI 兼容接口
         minimax / deepseek / … → 预设的 OpenAI 兼容服务
+    界面里保存的配置优先级最高（界面配置 → 环境变量 → 预设默认值）。
+    override 用于「测试连接」：直接用界面上尚未保存的地址/模型/Key 试连。
     """
-    name = (backend or config.LLM_BACKEND or "local").strip().lower()
+    user = load_user_config()
+    name = (backend or user.get("backend") or config.LLM_BACKEND or "local").strip().lower()
 
     if name in ("local", "mlx", "mlx-lm"):
         return _build_local_client()
 
     preset = config.LLM_PRESETS.get(name)
-    # 自定义 base 优先：配了 STT_LLM_API_BASE / STT_LLM_ENDPOINT 就用它，
-    # 此时模型名沿用预设或 STT_LLM_API_MODEL。
-    custom_base = (config.LLM_API_BASE or os.environ.get("STT_LLM_ENDPOINT", "").strip()).rstrip("/")
-    if custom_base:
-        model = config.LLM_API_MODEL or (preset or {}).get("model") or "local-model"
-        api_key = config.LLM_API_KEY or os.environ.get("STT_LLM_API_KEY", "")
-        if not api_key and not _is_local_endpoint(custom_base):
-            raise RuntimeError(
-                f"后端 {name} 需要 API Key：请设置 STT_LLM_API_KEY 环境变量"
-            )
-        return _openai_client(custom_base, api_key=api_key, model=model), f"openai:{custom_base}:{model}"
-
-    if preset:
-        base = preset["base"]
-        model = config.LLM_API_MODEL or preset["model"]
-        key_env = preset.get("key_env") or ""
-        api_key = config.LLM_API_KEY or (os.environ.get(key_env, "") if key_env else "")
-        if not api_key and not _is_local_endpoint(base):
-            raise RuntimeError(
-                f"后端 {name} 需要 API Key：请设置 {key_env or 'STT_LLM_API_KEY'} 环境变量"
-            )
-        return _openai_client(base, api_key=api_key, model=model), f"openai:{name}:{model}"
-
-    raise RuntimeError(
-        f"未知后端 {name}；可用：local、openai，或 {', '.join(config.LLM_PRESETS)}"
-    )
+    base, model, api_key = _resolve_online(name, override=override)
+    if not base:
+        raise RuntimeError(
+            f"未知后端 {name}；可用：local、openai，或 {', '.join(config.LLM_PRESETS)}"
+        )
+    if not api_key and not _is_local_endpoint(base):
+        raise RuntimeError(
+            f"后端 {name} 需要 API Key：请在界面「模型设置」里填写，"
+            f"或设置 {preset.get('key_env') if preset else 'STT_LLM_API_KEY'} 环境变量"
+        )
+    return _openai_client(base, api_key=api_key, model=model), f"openai:{name}:{model}"
 
 
 def _is_local_endpoint(base: str) -> bool:
@@ -202,9 +286,30 @@ def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
     return generate
 
 
+def test_connection(backend: Optional[str] = None,
+                   override: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """连通性自检：发一个极小的请求，确认后端与 Key 可用。
+
+    override 传入界面尚未保存的 base/model/api_key，可直接试连。
+    """
+    name = (backend or load_user_config().get("backend") or config.LLM_BACKEND or "local").lower()
+    if name in ("local", "mlx", "mlx-lm"):
+        return {"ok": False, "backend": "local",
+                "message": "本地后端需要 GPU（Metal）；当前环境不可用时请改用网络 API"}
+    try:
+        fn, info = _build_client(name, override=override)
+    except Exception as exc:
+        return {"ok": False, "backend": name, "message": str(exc)}
+    try:
+        out = fn("回复两个字：好的", "只回复「好的」两个字。", max_tokens=16, temperature=0.1)
+    except Exception as exc:
+        return {"ok": False, "backend": name, "message": f"{type(exc).__name__}: {exc}"}
+    return {"ok": True, "backend": name, "info": info,
+            "message": f"连通正常，模型回应：{(out or '')[:40]}"}
+
+
 class LocalLLM:
     """线程安全的 LLM 包装（本地 mlx-lm 或 OpenAI 兼容网络 API）。"""
-
     def __init__(self, backend: Optional[str] = None) -> None:
         self._generate = None
         self._info = ""

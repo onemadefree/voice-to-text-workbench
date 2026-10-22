@@ -26,6 +26,7 @@
       <select id="llmSel" title="润色/知识库使用的模型后端">
         <option value="">润色后端：本地</option>
       </select>
+      <button id="btnLlmSet" title="配置在线模型 API">⚙️ 模型设置</button>
       <button id="btnPolishAll" title="LLM 纠错 + 润色全篇">AI 润色全篇</button>
       <button id="btnKB" title="提炼知识库资料">生成知识库</button>
       <div class="dropdown">
@@ -111,6 +112,44 @@
       </div>
     </section>
   </main>
+
+  <div id="llmPanel" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>在线模型 API 设置</h3>
+        <button id="btnLlmClose" class="chip">✕</button>
+      </div>
+      <p class="muted small">
+        润色与知识库默认用本地模型（离线）。这里可以切换到网络 API（MiniMax / DeepSeek /
+        通义 / Kimi / 任意 OpenAI 兼容服务）。配置只保存在本机
+        <code>.cache/llm_config.json</code>，不会上传，也不会进 Git。
+      </p>
+      <label class="field">
+        <span>后端</span>
+        <select id="cfgBackend">
+          <option value="local">本地模型（离线，默认）</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>接口地址 Base URL</span>
+        <input id="cfgBase" type="text" placeholder="https://api.minimax.chat/v1" />
+      </label>
+      <label class="field">
+        <span>模型名</span>
+        <input id="cfgModel" type="text" placeholder="MiniMax-Text-01" />
+      </label>
+      <label class="field">
+        <span>API Key</span>
+        <input id="cfgKey" type="password" placeholder="sk-…（留空表示用环境变量）" />
+      </label>
+      <div class="modal-acts">
+        <button id="btnLlmSave" class="primary">保存</button>
+        <button id="btnLlmTest" class="chip">测试连接</button>
+        <button id="btnLlmClear" class="chip">清除配置</button>
+        <span id="llmMsg" class="muted small"></span>
+      </div>
+    </div>
+  </div>
 
   <div id="toast" class="toast hidden"></div>
 </div>

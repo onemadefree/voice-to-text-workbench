@@ -13,6 +13,7 @@ const state = {
   pollingJob: false,
   lastActive: -1,
   dragStart: null,   // 拖拽选段起点
+  llmCfg: {},        // 界面里保存的在线模型配置
 };
 
 /* ------------------------------------------------------------------ 工具 */
@@ -68,21 +69,7 @@ async function init() {
   $('sourceDir').title = health.source_dir;
 
   // 润色后端下拉：本地默认，其余为可选的网络 API
-  try {
-    const bl = await api('/api/llm/backends');
-    const sel = $('llmSel');
-    sel.innerHTML = '';
-    for (const b of bl.backends) {
-      const opt = document.createElement('option');
-      opt.value = b.id;
-      opt.textContent = b.label + (b.ready ? '' : '（未配置 Key）');
-      opt.disabled = !b.ready;
-      if (b.id === 'local') opt.textContent = b.label;
-      sel.appendChild(opt);
-    }
-    sel.value = bl.backends.some(b => b.id === bl.default && b.ready) ? bl.default : 'local';
-    sel.onchange = () => toast(`润色后端：${sel.options[sel.selectedIndex].text}`);
-  } catch (e) { /* 后端列表拿不到就用默认本地 */ }
+  await refreshLlmBackends();
 
   $('audio').addEventListener('timeupdate', onTimeUpdate);
   $('audio').addEventListener('loadedmetadata', () => {
@@ -102,6 +89,13 @@ async function init() {
   $('btnPolishAll').onclick = () => polish(null);
   $('btnPolishSel').onclick = () => polish([...state.selected]);
   $('btnKB').onclick = buildKB;
+  $('btnLlmSet').onclick = openLlmPanel;
+  $('btnLlmClose').onclick = closeLlmPanel;
+  $('btnLlmSave').onclick = saveLlmConfig;
+  $('btnLlmTest').onclick = testLlmBackend;
+  $('btnLlmClear').onclick = clearLlmConfig;
+  $('cfgBackend').onchange = onCfgBackendChange;
+  $('llmPanel').onclick = (e) => { if (e.target === $('llmPanel')) closeLlmPanel(); };
   $('btnKbCopy').onclick = async () => {
     try { await navigator.clipboard.writeText($('kbText').textContent); toast('已复制到剪贴板'); }
     catch (e) { toast('复制失败，请手动选择'); }
@@ -132,6 +126,177 @@ async function init() {
     await selectFile(state.files[0].id);
   }
   window.addEventListener('resize', drawWave);
+}
+
+/* ------------------------------------------- 在线模型 API 设置（⚙️ 模型设置） */
+const LLM_LOCAL = 'local';
+const LLM_CUSTOM = 'custom';
+
+function setLlmMsg(text, bad = false) {
+  const el = $('llmMsg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = bad ? '#ef5350' : '';
+}
+
+/** 刷新顶部「润色后端」下拉：本地默认，未配 Key 的在线后端置灰。 */
+async function refreshLlmBackends() {
+  try {
+    const bl = await api('/api/llm/backends');
+    const sel = $('llmSel');
+    if (!sel) return;
+    const prev = sel.value;
+    const ready = {};
+    sel.innerHTML = '';
+    for (const b of bl.backends) {
+      ready[b.id] = !!b.ready;
+      const opt = document.createElement('option');
+      opt.value = b.id;
+      opt.textContent = b.id === LLM_LOCAL ? b.label : b.label + (b.ready ? '' : '（未配置 Key）');
+      opt.disabled = !b.ready;
+      sel.appendChild(opt);
+    }
+    const pick = [prev, bl.default, LLM_LOCAL].find(id => id && ready[id]);
+    sel.value = pick || LLM_LOCAL;
+    sel.onchange = () => toast(`润色后端：${sel.options[sel.selectedIndex].textContent}`);
+  } catch (e) { /* 后端列表拿不到就用默认本地 */ }
+}
+
+async function openLlmPanel() {
+  $('llmPanel').classList.remove('hidden');
+  setLlmMsg('');
+  await loadLlmConfig();
+}
+
+function closeLlmPanel() {
+  $('llmPanel').classList.add('hidden');
+  $('cfgKey').value = '';   // 不在内存里留明文 Key
+}
+
+/** 读取已保存配置并回填表单（Key 只显示末 4 位，不回填明文）。 */
+async function loadLlmConfig() {
+  let cfg = {};
+  try {
+    cfg = await api('/api/llm/config');
+  } catch (e) {
+    setLlmMsg('读取配置失败：' + e.message, true);
+    return;
+  }
+  state.llmCfg = cfg;
+  const presets = cfg.presets || {};
+  const sel = $('cfgBackend');
+  sel.innerHTML = '';
+  const addOpt = (v, t) => {
+    const o = document.createElement('option');
+    o.value = v;
+    o.textContent = t;
+    sel.appendChild(o);
+  };
+  addOpt(LLM_LOCAL, '本地模型（离线，默认）');
+  for (const [id, p] of Object.entries(presets)) addOpt(id, p.label || id);
+  addOpt(LLM_CUSTOM, '自定义 OpenAI 兼容（任意 Base URL）');
+
+  const cur = cfg.backend || LLM_LOCAL;
+  sel.value = [...sel.options].some(o => o.value === cur) ? cur : LLM_LOCAL;
+
+  $('cfgKey').value = '';
+  $('cfgKey').placeholder = cfg.has_key
+    ? `已保存（${cfg.key_hint}），留空表示不修改`
+    : 'sk-…（留空表示用环境变量）';
+
+  const p = presets[cur] || {};
+  $('cfgBase').value = cur === LLM_LOCAL ? '' : (cfg.base || p.base || '');
+  $('cfgModel').value = cur === LLM_LOCAL ? '' : (cfg.model || p.model || '');
+
+  if (cfg.saved) {
+    setLlmMsg(`当前配置：${cur}${cfg.has_key ? ' · Key ' + cfg.key_hint : ''}`);
+  }
+}
+
+/** 切换后端时自动带出默认地址/模型。 */
+function onCfgBackendChange() {
+  const id = $('cfgBackend').value;
+  const presets = (state.llmCfg || {}).presets || {};
+  if (id === LLM_LOCAL) {
+    $('cfgBase').value = '';
+    $('cfgModel').value = '';
+    setLlmMsg('已选本地模型：离线运行，不需要 Key');
+    return;
+  }
+  if (id === LLM_CUSTOM) {
+    setLlmMsg('填入 Base URL 与模型名，兼容任何 OpenAI 协议服务');
+    return;
+  }
+  const p = presets[id] || {};
+  if (p.base) $('cfgBase').value = p.base;
+  if (p.model) $('cfgModel').value = p.model;
+  setLlmMsg(p.key_env
+    ? `默认从环境变量 ${p.key_env} 读 Key，也可在下方直接填写`
+    : '请填写 API Key 后保存');
+}
+
+/** 收集表单里的测试/保存参数。 */
+function llmFormValues() {
+  return {
+    backend: $('cfgBackend').value,
+    base: $('cfgBase').value.trim(),
+    model: $('cfgModel').value.trim(),
+    api_key: $('cfgKey').value.trim(),
+  };
+}
+
+async function saveLlmConfig() {
+  const v = llmFormValues();
+  if (v.backend === LLM_LOCAL) {
+    setLlmMsg('本地模型无需配置，直接用顶部下拉选择「本地」即可', true);
+    return;
+  }
+  if (!v.base) {
+    setLlmMsg('请填写接口地址 Base URL', true);
+    return;
+  }
+  setLlmMsg('保存中…');
+  try {
+    const body = { backend: v.backend, base: v.base, model: v.model };
+    if (v.api_key) body.api_key = v.api_key;   // 留空 = 不修改已保存的 Key
+    const r = await api('/api/llm/config', { method: 'POST', body: JSON.stringify(body) });
+    setLlmMsg(r.message || '已保存');
+    $('cfgKey').value = '';
+    await loadLlmConfig();
+    await refreshLlmBackends();
+    toast('模型配置已保存');
+  } catch (e) {
+    setLlmMsg('保存失败：' + e.message, true);
+  }
+}
+
+async function testLlmBackend() {
+  const v = llmFormValues();
+  if (v.backend === LLM_LOCAL) {
+    setLlmMsg('本地模型需要 GPU（Metal），无法用网络方式自检', true);
+    return;
+  }
+  setLlmMsg('测试中…');
+  try {
+    const r = await api('/api/llm/test', { method: 'POST', body: JSON.stringify(v) });
+    setLlmMsg(r.message || (r.ok ? '连通正常' : '连接失败'), !r.ok);
+  } catch (e) {
+    setLlmMsg('测试失败：' + e.message, true);
+  }
+}
+
+async function clearLlmConfig() {
+  setLlmMsg('清除中…');
+  try {
+    const r = await api('/api/llm/config', { method: 'POST', body: JSON.stringify({ clear: true }) });
+    setLlmMsg(r.message || '已清除');
+    $('cfgKey').value = '';
+    await loadLlmConfig();
+    await refreshLlmBackends();
+    toast('已清除在线模型配置');
+  } catch (e) {
+    setLlmMsg('清除失败：' + e.message, true);
+  }
 }
 
 async function loadFiles() {

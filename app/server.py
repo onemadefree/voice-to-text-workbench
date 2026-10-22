@@ -125,33 +125,58 @@ def health() -> Dict[str, Any]:
 
 @app.get("/api/llm/backends")
 def llm_backends() -> Dict[str, Any]:
-    """可用的润色/知识库后端。key_env 有值且已配置环境变量 → 标记为就绪。"""
-    items = [{
-        "id": "local",
-        "label": f"本地 {config.LLM_MODEL}（默认，离线）",
-        "ready": True,
-    }]
-    for key, preset in config.LLM_PRESETS.items():
-        key_env = preset.get("key_env") or ""
-        ready = True
-        if key_env:
-            ready = bool(os.environ.get(key_env) or config.LLM_API_KEY)
-        items.append({
-            "id": key,
-            "label": preset.get("label") or key,
-            "model": preset.get("model"),
-            "ready": ready,
-            "key_env": key_env or None,
-        })
-    if config.LLM_API_BASE:
-        items.append({
-            "id": "openai",
-            "label": f"自定义 OpenAI 兼容：{config.LLM_API_BASE}",
-            "model": config.LLM_API_MODEL or "local-model",
-            "ready": bool(config.LLM_API_KEY),
-            "key_env": "STT_LLM_API_KEY",
-        })
-    return {"default": config.LLM_BACKEND, "backends": items}
+    """可用的润色/知识库后端。"""
+    from .llm import describe_backends, load_user_config
+
+    user = load_user_config()
+    return {"default": user.get("backend") or config.LLM_BACKEND,
+            "backends": describe_backends()}
+
+
+@app.get("/api/llm/config")
+def llm_config() -> Dict[str, Any]:
+    """读取界面里保存的在线模型配置（Key 只回显末 4 位）。"""
+    from .llm import load_user_config
+
+    user = load_user_config()
+    key = user.get("api_key", "")
+    return {
+        "backend": user.get("backend") or config.LLM_BACKEND,
+        "base": user.get("base", ""),
+        "model": user.get("model", ""),
+        "has_key": bool(key),
+        "key_hint": ("*" * 4 + key[-4:]) if key else "",
+        "saved": bool(user),
+        "presets": {k: {"base": v.get("base"), "model": v.get("model"),
+                        "label": v.get("label"), "key_env": v.get("key_env")}
+                    for k, v in config.LLM_PRESETS.items()},
+    }
+
+
+@app.post("/api/llm/config")
+def save_llm_config(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """保存在线模型配置（存本地 .cache/llm_config.json，不进 git）。"""
+    from .llm import clear_user_config, save_user_config
+
+    if payload.get("clear"):
+        clear_user_config()
+        return {"ok": True, "cleared": True, "message": "已清除在线模型配置"}
+    saved = save_user_config(payload)
+    return {"ok": True, "saved": True,
+            "backend": saved.get("backend", ""),
+            "has_key": bool(saved.get("api_key")),
+            "message": "已保存，后续润色将使用该后端"}
+
+
+@app.post("/api/llm/test")
+def test_llm(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """连通性自检。可带上界面里尚未保存的 base/model/api_key 直接试连。"""
+    from .llm import test_connection
+
+    backend = str(payload.get("backend") or "").strip() or None
+    override = {k: str(payload.get(k) or "").strip() for k in ("base", "model", "api_key")}
+    override = {k: v for k, v in override.items() if v}
+    return test_connection(backend, override=override or None)
 
 
 @app.get("/api/files")
