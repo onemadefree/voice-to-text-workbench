@@ -23,6 +23,10 @@ ALIGNER_MODEL = os.environ.get("STT_ALIGNER_MODEL", "mlx-community/Qwen3-ForcedA
 # 后处理用本地 LLM
 LLM_MODEL = os.environ.get("STT_LLM_MODEL", "mlx-community/Qwen3-8B-4bit")
 
+# 构建标记：改动了服务行为（尤其是 LLM 实例复用/显存回收）时 +1，
+# 用来确认「跑着的服务」加载的是不是最新代码。
+APP_BUILD = os.environ.get("STT_APP_BUILD", "2026-10-22-polishfix")
+
 # ---------------------------------------------------------------- 润色后端
 # local  = mlx-lm 本地推理（默认，全离线）
 # openai = 任意 OpenAI 兼容网络 API；也可直接用下面的预设名（minimax/deepseek/…）

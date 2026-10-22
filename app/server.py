@@ -114,6 +114,7 @@ def index() -> HTMLResponse:
 def health() -> Dict[str, Any]:
     return {
         "ok": True,
+        "build": config.APP_BUILD,
         "source_dir": str(config.SOURCE_DIR),
         "output_dir": str(config.OUTPUT_DIR),
         "asr_model": config.ASR_MODEL,
