@@ -57,6 +57,11 @@ KB_SYSTEM = """你是一名内容编辑。你会收到一段演讲的整理稿�
 
 篇幅要求：要点不超过 30 条，术语表不超过 15 条。必须完整输出全部 5 个小节，
 不要在最后一句中途停下（前面写太多导致「术语表」「待确认」写不完）。
+
+只提炼原文里真实出现的内容，不得补充原文没有的信息：
+- 原文说"总书记"就写"总书记"，不要自行补全成具体人名；反之亦然
+- 不要添加原文没有的引语、出处、数字或结论
+- 原文含糊的地方写进「待确认」，不要靠常识补全
 """
 
 
@@ -802,6 +807,28 @@ def _kb_complete(text: str) -> bool:
     return all(sec in (text or "") for sec in KB_SECTIONS)
 
 
+# 常见的政治/人物专名：知识库里出现但原文没有 = 模型自行补全，属于加戏
+_NAME_TOKENS = ("习近平", "毛泽东", "邓小平", "江泽民", "胡锦涛", "李克强",
+                "周恩来", "刘少奇", "陈云", "朱德", "马克思", "恩格斯",
+                "列宁", "斯大林", "孙中山", "蒋介石")
+
+
+def _kb_adds_names(kb: str, source: str) -> bool:
+    """检查知识库有没有自行补出原文没有的人物专名。
+
+    原文说"总书记"而知识库写"习近平指出"，就是模型加了原文没有的信息，
+    违反"只做提炼不加戏"的要求，要退回重试。
+
+    注意要按集合整体比对：原文写"马克思在《共产党宣言》里提出"，
+    知识库写成"马克思和恩格斯创立了…"，多出来的"恩格斯"同样属于加戏。
+    """
+    kb_names = {n for n in _NAME_TOKENS if n in kb}
+    if not kb_names:
+        return False
+    src_names = {n for n in _NAME_TOKENS if n in source}
+    return bool(kb_names - src_names)
+
+
 _THINK_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
 
 
@@ -908,7 +935,7 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
         except Exception as exc:
             log.warning("知识库生成失败: %s", exc)
             out = ""
-        if out.strip() and _kb_complete(out):
+        if out.strip() and _kb_complete(out) and not _kb_adds_names(out, full_text):
             break
         if attempt == 0:
             # 上一次被 max_tokens 截断或漏了小节：重来一次，并明确要求收着写
@@ -917,6 +944,7 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
                 "\n\n注意：上一次输出被截断或缺少小节。请务必输出全部 5 个小节"
                 "（标题/摘要/要点/术语表/待确认），要点控制在 25 条以内、术语表 10 条以内，"
                 "务必以「## 待确认」小节结尾。"
+                "另外只写原文里真实出现过的人名与称谓，不要自行补全。"
             )
     out = (out or "").strip()
     # 兜底：仍缺小节就补空节，保证结构完整
