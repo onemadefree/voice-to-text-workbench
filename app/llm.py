@@ -360,6 +360,14 @@ def fetch_model_list(base: str, api_key: str = "", timeout: Optional[int] = None
     )
 
 
+class ContentBlocked(RuntimeError):
+    """内容审核拦截（服务端返回 new_sensitive 等）。
+
+    这类错误重试多少次都一样，必须让上层直接跳过受影响的片段，
+    否则会白等好几轮退避，还可能把整批内容丢掉。
+    """
+
+
 def resolve_probe_target(backend: str, override: Optional[Dict[str, str]] = None) -> tuple[str, str]:
     """解析探测模型列表用的 (base, api_key)。
 
@@ -413,13 +421,17 @@ def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
                     return text
                 last = "空响应"
             except urllib.error.HTTPError as exc:
-                # 422/429 多半是并发限流或参数被网关拒绝，带上响应体便于排查
+                # 带上响应体便于排查（原来只有状态码，看不出原因）
                 detail = ""
                 try:
-                    detail = exc.read().decode("utf-8", "ignore")[:200]
+                    detail = exc.read().decode("utf-8", "ignore")[:300]
                 except Exception:
                     pass
                 last = f"HTTP {exc.code}: {detail}"
+                if "new_sensitive" in detail or "sensitive" in detail.lower():
+                    # 内容审核拦截：重试多少次都一样，直接放弃这一段
+                    log.warning("内容审核拦截，跳过本段: %s", detail[:160])
+                    raise ContentBlocked(detail[:160]) from exc
                 if exc.code in (422, 429, 503):
                     # 限流：多等一会儿再试，别把退避压到几秒钟
                     time.sleep(min(20 * attempt, 60))
@@ -810,6 +822,43 @@ def _strip_think(text: str) -> str:
     return out.strip()
 
 
+def _extract_part(llm: LocalLLM, part: str, label: str, budget: int) -> str:
+    """提炼一段文字。内容审核拦截时切细重试，尽量把内容救回来。"""
+    try:
+        return llm.complete(
+            f"这是演讲稿的{label}：\n\n{part}",
+            CHUNK_SYSTEM,
+            max_tokens=1400 + budget,
+            temperature=0.2,
+        )
+    except ContentBlocked:
+        # 整段触发审核：切成两半各试一次，能救一半算一半
+        mid = len(part) // 2
+        got = []
+        for sub, sub_label in ((part[:mid], f"{label}上半"), (part[mid:], f"{label}下半")):
+            if not sub.strip():
+                continue
+            try:
+                out = llm.complete(
+                    f"这是演讲稿的{sub_label}：\n\n{sub}",
+                    CHUNK_SYSTEM,
+                    max_tokens=1400 + budget,
+                    temperature=0.2,
+                )
+            except ContentBlocked:
+                continue
+            except Exception:
+                continue
+            if out.strip():
+                got.append(out.strip())
+        if got:
+            return "\n".join(got)
+        raise
+    except Exception as exc:
+        log.warning("分段提炼失败 (%s): %s", label, exc)
+        return ""
+
+
 def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
     """长稿走「分段提炼 → 汇总」两段式，避免一次性超长输入。"""
     if not full_text.strip():
@@ -822,12 +871,7 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
     budget = getattr(llm, "budget_extra", 0)
     for idx, part in enumerate(parts):
         try:
-            out = llm.complete(
-                f"这是演讲稿的第 {idx + 1}/{len(parts)} 部分：\n\n{part}",
-                CHUNK_SYSTEM,
-                max_tokens=1400 + budget,
-                temperature=0.2,
-            )
+            out = _extract_part(llm, part, f"第 {idx + 1}/{len(parts)} 部分", budget)
         except Exception as exc:
             log.warning("分段提炼失败 (%d/%d): %s", idx + 1, len(parts), exc)
             continue
