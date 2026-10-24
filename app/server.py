@@ -239,6 +239,8 @@ def get_doc(doc_id: str) -> Dict[str, Any]:
         "message": job.message,
         "running": job.running,
         "error": job.error,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
     } if job else None
     return doc
 

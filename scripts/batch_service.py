@@ -45,15 +45,20 @@ def api(method: str, path: str, payload=None):
 
 
 def wait_job(doc_id: str, label: str, timeout: float = 14400,
-             not_before: float = 0.0) -> dict:
+             not_before: float = 0.0, done_when=None) -> dict:
     """等任务跑完。
 
     not_before 是发起请求的时刻：任务线程是异步启动的，刚 POST 完立刻查询
     可能拿到上一次的旧 job（已 finished）而被误判为「已完成」，所以必须
     等到 job.started_at 晚于请求时刻才算数。
+
+    done_when(doc) 是内容层面的完成判定，比时间戳可靠：润色看「所有段落都有
+    润色结果」，知识库看「knowledge_base 非空」。旧服务不返回 started_at 时
+    靠它兜底。
     """
     t0 = time.time()
     last = ""
+    seen_running = not_before <= 0
     while time.time() - t0 < timeout:
         try:
             doc = api("GET", f"/api/doc/{urllib.parse.quote(doc_id)}")
@@ -71,9 +76,19 @@ def wait_job(doc_id: str, label: str, timeout: float = 14400,
             last = line
         if job.get("error"):
             raise SystemExit(f"{label} 失败: {job['error']}")
-        started = job.get("started_at") or 0
-        if job and started >= not_before and not job.get("running"):
-            return doc
+        if job.get("running"):
+            seen_running = True
+        started = job.get("started_at")
+        if started is not None:
+            if started >= not_before and not job.get("running"):
+                return doc
+        else:
+            # 旧服务没有 started_at：等看到运行中再等它结束
+            if job and seen_running and not job.get("running"):
+                return doc
+            # 任务可能瞬间完成（无事可做），用内容判定兜底
+            if done_when and done_when(doc):
+                return doc
         time.sleep(5)
     raise SystemExit(f"{label} 超时")
 
@@ -135,12 +150,15 @@ def main() -> int:
             t = time.time()
             api("POST", f"/api/doc/{urllib.parse.quote(doc_id)}/polish",
                 {"level": "standard", "backend": args.llm})
-            wait_job(doc_id, "润色", not_before=t)
+            wait_job(doc_id, "润色", not_before=t,
+                     done_when=lambda d: bool(d.get("segments")) and all(
+                         s.get("polished") for s in d.get("segments") or []))
         if not args.no_kb:
             t = time.time()
             api("POST", f"/api/doc/{urllib.parse.quote(doc_id)}/knowledge_base",
                 {"backend": args.llm})
-            wait_job(doc_id, "知识库", not_before=t)
+            wait_job(doc_id, "知识库", not_before=t,
+                     done_when=lambda d: bool(d.get("knowledge_base")))
         print(f"  → {export_txt(doc_id)}", flush=True)
 
     print("\n全部完成")
