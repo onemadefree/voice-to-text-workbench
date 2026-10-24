@@ -402,10 +402,11 @@ def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
                 with urllib.request.urlopen(req, timeout=config.LLM_API_TIMEOUT) as resp:
                     data = json.loads(resp.read().decode("utf-8", "ignore"))
                 msg = (data.get("choices") or [{}])[0].get("message") or {}
-                # 推理型模型（如 MiniMax-M1/M2）正文可能落在 reasoning_content
+                # 推理型模型（如 MiniMax-M1/M2/M3）正文可能落在 reasoning_content
                 text = (msg.get("content") or "").strip()
                 if not text:
                     text = (msg.get("reasoning_content") or "").strip()
+                text = _strip_think(text)
                 if text:
                     return text
                 last = "空响应"
@@ -519,6 +520,7 @@ def polish_segments(
             except Exception as exc:
                 log.warning("润色批次失败: %s", exc)
                 raw_out = ""
+            raw_out = _strip_think(raw_out)
             if raw_out.strip():
                 break
         mapping = _parse_indexed(raw_out, len(idxs))
@@ -557,7 +559,8 @@ def _aligned(src: str, cand: str, threshold: float = 0.30) -> bool:
 
 
 def max_tokens_for(idxs: Sequence[int]) -> int:
-    return max(1024, min(8192, len(idxs) * 320))
+    # 推理模型会先花掉一部分 token 思考，给足上限免得正文被截
+    return max(1024, min(8192, len(idxs) * 400))
 
 
 def _parse_indexed(raw: str, expect: int) -> Dict[int, str]:
@@ -669,6 +672,26 @@ KB_SECTIONS = ("## 摘要", "## 要点", "## 术语表", "## 待确认")
 def _kb_complete(text: str) -> bool:
     """知识库是否 5 个小节齐全（防止 max_tokens 截断后残缺）。"""
     return all(sec in (text or "") for sec in KB_SECTIONS)
+
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
+
+
+def _strip_think(text: str) -> str:
+    """去掉推理模型塞在正文里的 <think>…</think> 思考块。
+
+    MiniMax M 系列（推理模型）会把思考过程和正文一起放进 content，
+    不剥掉的话：JSON 行解析会被思考里的编号/引号带偏，
+    极端情况下整个思维链会被当成润色结果写进稿子。
+    """
+    if not text:
+        return ""
+    out = _THINK_RE.sub("", text)
+    low = out.lower()
+    i = low.find("<think>")
+    if i >= 0:          # 未闭合的思考块：从 <think> 起到结尾全部丢掉
+        out = out[:i]
+    return out.strip()
 
 
 def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:

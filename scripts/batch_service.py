@@ -111,6 +111,8 @@ def main() -> int:
     ap.add_argument("--polish-only", action="store_true",
                     help="跳过转写，只做清理+润色+知识库+导出")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--force-polish", action="store_true",
+                    help="重刷已润色段落（换模型后想统一质量时用）")
     ap.add_argument("--skip-existing", action="store_true", help="已有结果就跳过")
     args = ap.parse_args()
 
@@ -149,7 +151,7 @@ def main() -> int:
         if not args.no_polish:
             t = time.time()
             api("POST", f"/api/doc/{urllib.parse.quote(doc_id)}/polish",
-                {"level": "standard", "backend": args.llm})
+                {"level": "standard", "backend": args.llm, "force": bool(args.force_polish)})
             wait_job(doc_id, "润色", not_before=t,
                      done_when=lambda d: bool(d.get("segments")) and all(
                          s.get("polished") for s in d.get("segments") or []))
