@@ -412,6 +412,21 @@ def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
                 if text:
                     return text
                 last = "空响应"
+            except urllib.error.HTTPError as exc:
+                # 422/429 多半是并发限流或参数被网关拒绝，带上响应体便于排查
+                detail = ""
+                try:
+                    detail = exc.read().decode("utf-8", "ignore")[:200]
+                except Exception:
+                    pass
+                last = f"HTTP {exc.code}: {detail}"
+                if exc.code in (422, 429, 503):
+                    # 限流：多等一会儿再试，别把退避压到几秒钟
+                    time.sleep(min(20 * attempt, 60))
+                else:
+                    time.sleep(min(2 ** attempt, 10))
+                log.warning("LLM 调用失败（第 %d 次）: %s", attempt, last)
+                continue
             except Exception as exc:  # 网络抖动/限流 → 退避重试
                 last = f"{type(exc).__name__}: {exc}"
                 log.warning("LLM 调用失败（第 %d 次）: %s", attempt, last[:200])
