@@ -179,6 +179,9 @@ def test_llm(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     backend = str(payload.get("backend") or "").strip() or None
     override = {k: str(payload.get(k) or "").strip() for k in ("base", "model", "api_key")}
     override = {k: v for k, v in override.items() if v}
+    if backend in (None, "", "local", "mlx", "mlx-lm"):
+        # 本地后端：复用管线里已缓存的实例（别再加载一份 8B 权重，16GB 机器会 OOM）
+        return test_connection("local", llm=pipeline.get_llm("local"))
     return test_connection(backend, override=override or None)
 
 

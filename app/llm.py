@@ -302,15 +302,26 @@ def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
 
 
 def test_connection(backend: Optional[str] = None,
-                   override: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                   override: Optional[Dict[str, str]] = None,
+                   llm=None) -> Dict[str, Any]:
     """连通性自检：发一个极小的请求，确认后端与 Key 可用。
 
     override 传入界面尚未保存的 base/model/api_key，可直接试连。
+    llm 传入已存在的 LocalLLM（本地后端），避免再加载一份 8B 权重。
     """
     name = (backend or load_user_config().get("backend") or config.LLM_BACKEND or "local").lower()
     if name in ("local", "mlx", "mlx-lm"):
-        return {"ok": False, "backend": "local",
-                "message": "本地后端需要 GPU（Metal）；当前环境不可用时请改用网络 API"}
+        # 本地后端要真的跑一次才作数：服务进程持有 GPU 时是通的。
+        # 优先复用调用方传进来的实例，别再单独加载一份 8B 权重。
+        try:
+            client = llm if llm is not None else LocalLLM(backend="local")
+            out = client.complete("回复两个字：好的", "只回复「好的」两个字。",
+                                  max_tokens=16, temperature=0.1)
+            return {"ok": True, "backend": "local", "info": client.info,
+                    "message": f"本地模型可用，回应：{(out or '')[:40]}"}
+        except Exception as exc:
+            return {"ok": False, "backend": "local",
+                    "message": f"本地模型不可用：{type(exc).__name__}: {exc}"}
     try:
         fn, info = _build_client(name, override=override)
     except Exception as exc:

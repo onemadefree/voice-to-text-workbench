@@ -248,7 +248,8 @@ function llmFormValues() {
 async function saveLlmConfig() {
   const v = llmFormValues();
   if (v.backend === LLM_LOCAL) {
-    setLlmMsg('本地模型无需配置，直接用顶部下拉选择「本地」即可', true);
+    // 本地模型没有地址/Key 可保存；清除已存的在线后端请用「清除配置」
+    setLlmMsg('本地模型无需配置。点「清除配置」可移除已保存的在线后端设置。');
     return;
   }
   if (!v.base) {
@@ -272,11 +273,9 @@ async function saveLlmConfig() {
 
 async function testLlmBackend() {
   const v = llmFormValues();
-  if (v.backend === LLM_LOCAL) {
-    setLlmMsg('本地模型需要 GPU（Metal），无法用网络方式自检', true);
-    return;
-  }
-  setLlmMsg('测试中…');
+  setLlmMsg(v.backend === LLM_LOCAL
+    ? '测试中…（本地模型首次测试需加载 8B 权重，约 10~60 秒）'
+    : '测试中…');
   try {
     const r = await api('/api/llm/test', { method: 'POST', body: JSON.stringify(v) });
     setLlmMsg(r.message || (r.ok ? '连通正常' : '连接失败'), !r.ok);

@@ -11,11 +11,11 @@ exec >> "$LOG" 2>&1
 
 echo "[$(date '+%F %T')] 等待服务以新代码重启…"
 code=""
-for _ in $(seq 1 1800); do
+for _ in $(seq 1 8640); do   # 最多等 24 小时
   body=$(curl -s -m 5 http://127.0.0.1:8787/api/health 2>/dev/null)
   if echo "$body" | grep -q '"build"'; then
     code="ok"
-    echo "[$(date '+%F %T')] 服务已重启：$body"
+    echo "[$(date '+%F %T')] 服务已就绪：$body"
     break
   fi
   sleep 10

@@ -85,7 +85,8 @@ def local_entries() -> list[tuple[str, str]]:
 
 def build_tree(entries: list[tuple[str, str, str]]) -> str:
     """用临时 index 建树，支持嵌套路径（git mktree 不接受带斜杠的路径）。"""
-    with tempfile.TemporaryDirectory() as tmp:
+    # 临时 index 放在仓库内：沙箱里 /tmp 可能不可写，git read-tree 会失败
+    with tempfile.TemporaryDirectory(dir=str(ROOT)) as tmp:
         index = os.path.join(tmp, "index")
         env = {**os.environ, "GIT_INDEX_FILE": index}
         subprocess.run(["git", "read-tree", "--empty"], cwd=ROOT, env=env,
@@ -262,6 +263,11 @@ def main() -> int:
             "content": base64.b64encode(data).decode("ascii"),
             "encoding": "base64",
         })
+        # 同时把内容写进本地对象库：工作区有未提交改动时，本地对象库里还没有
+        # 这个 blob，后面 build_tree 会因为 "invalid object" 失败
+        local_blob = git("hash-object", "-w", "--", path)
+        if local_blob != blob["sha"]:
+            raise SystemExit(f"{path}: 本地 blob {local_blob[:10]} 与远端 {blob['sha'][:10]} 不一致")
         tree_entries.append({"path": path, "mode": mode, "type": "blob", "sha": blob["sha"]})
     print(f"  上传 blob {len(tree_entries)} 个", flush=True)
 
