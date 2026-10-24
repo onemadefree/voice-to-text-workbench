@@ -636,7 +636,6 @@ def _aligned(src: str, cand: str, threshold: float = 0.30) -> bool:
 _CN_YEAR_RE = re.compile(r"[零〇一二三四五六七八九]{4}(?=年)")
 _CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
               "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-_CN_DIGITS_KEYS = "".join(_CN_DIGITS)
 
 
 def _cn_year_to_int(s: str) -> Optional[int]:
@@ -673,13 +672,14 @@ def _numbers_preserved(src: str, cand: str) -> bool:
     return src_years.issubset(cand_years)
 
 
-# 中文数字后面跟这些单位时，是真数字（「三元」「二号」「三届」）
-_NUM_UNIT_CHARS = "年月日元万亿号届季％%倍秒厘"
-# 只统计真正的数字信息：连续中文数字串 / 跟单位相邻的单个中文数字 / 阿拉伯数字。
-# 「统一下」「一点」这种含「一」的普通词不计入，否则口吃压缩会被误判成丢数字。
+# 真正的数字才算数：三位以上的数字串、跟单位相邻的两位数字串、阿拉伯数字。
+# 「一一定」「统一一下」「大杀四四方」这种含叠字的普通词不计入，
+# 否则模型正常顺句（把口吃去掉）会被误判成丢数字。
+_CN_NUM_CHARS = "零〇一二三四五六七八九幺"
+_NUM_UNIT_CHARS = "年月日元万亿号届季％%倍秒厘后前初"
 RE_NUM_TOKEN = re.compile(
-    rf"[{_CN_DIGITS_KEYS}]{{2,}}"
-    rf"|[{_CN_DIGITS_KEYS}](?=[{_NUM_UNIT_CHARS}])"
+    rf"[{_CN_NUM_CHARS}]{{3,}}"
+    rf"|[{_CN_NUM_CHARS}]{{2}}(?=[{_NUM_UNIT_CHARS}{_CN_NUM_CHARS}])"
     rf"|\d+"
 )
 
