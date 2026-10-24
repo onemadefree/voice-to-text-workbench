@@ -580,17 +580,22 @@ def polish_segments(
             return
         for pos, i in enumerate(idxs):
             src = (segments[i].get("raw") or segments[i].get("text") or "").strip()
+            # 原始转写稿（未经规整），数字保真的第二基准。
+            # 规整阶段若把年份压坏一位（例如 二零二零年 → 二零年），
+            # 候选结果即使过了 clean 基准的校验，也会被这里拦下来。
+            orig = (segments[i].get("text") or "").strip()
             cand = (mapping.get(pos) or "").strip()
             if not cand:
-                out[i] = src
+                out[i] = _safe_base(src, orig)
                 continue
             if not _aligned(src, cand, align_threshold):
                 log.info("润色结果与原文不匹配（第 %d 条），保留原文", pos + 1)
-                out[i] = src
+                out[i] = _safe_base(src, orig)
                 continue
-            if not _numbers_preserved(src, cand):
+            if not _numbers_preserved(src, cand) or not _digits_intact(src, cand) or (
+                    orig and orig != src and not _numbers_preserved(orig, cand)):
                 log.info("润色结果丢失原文数字（第 %d 条），保留原文", pos + 1)
-                out[i] = src
+                out[i] = _safe_base(src, orig)
                 continue
             out[i] = cand
 
@@ -603,6 +608,17 @@ def polish_segments(
         buf_len += text_len
     flush(batch)
     return out
+
+
+def _safe_base(src: str, orig: str) -> str:
+    """润色不可用时的回退基准。
+
+    优先用规整后的文本；只有当规整文本把原文数字弄丢了，才退回原始
+    转写稿——宁可句子不够顺，也不能把年份/金额写错。
+    """
+    if orig and (not _numbers_preserved(orig, src) or not _digits_intact(orig, src)):
+        return orig
+    return src
 
 
 def _aligned(src: str, cand: str, threshold: float = 0.30) -> bool:
@@ -620,6 +636,7 @@ def _aligned(src: str, cand: str, threshold: float = 0.30) -> bool:
 _CN_YEAR_RE = re.compile(r"[零〇一二三四五六七八九]{4}(?=年)")
 _CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
               "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_DIGITS_KEYS = "".join(_CN_DIGITS)
 
 
 def _cn_year_to_int(s: str) -> Optional[int]:
@@ -654,6 +671,31 @@ def _numbers_preserved(src: str, cand: str) -> bool:
         cand_years.add(int(m.group(0)))
 
     return src_years.issubset(cand_years)
+
+
+# 中文数字后面跟这些单位时，是真数字（「三元」「二号」「三届」）
+_NUM_UNIT_CHARS = "年月日元万亿号届季％%倍秒厘"
+# 只统计真正的数字信息：连续中文数字串 / 跟单位相邻的单个中文数字 / 阿拉伯数字。
+# 「统一下」「一点」这种含「一」的普通词不计入，否则口吃压缩会被误判成丢数字。
+RE_NUM_TOKEN = re.compile(
+    rf"[{_CN_DIGITS_KEYS}]{{2,}}"
+    rf"|[{_CN_DIGITS_KEYS}](?=[{_NUM_UNIT_CHARS}])"
+    rf"|\d+"
+)
+
+
+def _digit_weight(text: str) -> int:
+    """文本里"数字信息"的重量（数字字符个数）。
+
+    模型把「二零二零」写成「2020」重量不变（4→4），把「二零二零年」写成
+    「二零年」重量减半（4→2），所以可以据此判断有没有丢数字。
+    """
+    return sum(len(m.group(0)) for m in RE_NUM_TOKEN.finditer(text or ""))
+
+
+def _digits_intact(src: str, cand: str) -> bool:
+    """数字信息没变少：中文数字改成阿拉伯数字不算丢，只丢字符才算。"""
+    return _digit_weight(cand) >= _digit_weight(src)
 
 
 def max_tokens_for(idxs: Sequence[int], extra: int = 0) -> int:

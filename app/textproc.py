@@ -49,6 +49,18 @@ RE_LEADING_JUNK = re.compile(r"^[\s,，.。、;；:：!！?？]+")
 RE_REPEAT_CJK = re.compile(rf"([{CJK}])\1{{1,}}")
 RE_REPEAT_WORD = re.compile(rf"([{CJK}]{{2,4}})\1+")
 
+# 中文数字串（年份、金额、口述数字）。叠字压缩会把它们误当口吃：
+#   「二零二零年」→ RE_REPEAT_WORD 压成「二零年」（年份直接错一位）
+#   「二零二二年」→ RE_REPEAT_CJK 压成「二零二年」
+#   「三三五元」   → RE_REPEAT_CJK 压成「三五元」（335 变 35）
+#   「二二年」     → RE_REPEAT_CJK 压成「二年」（2022 变 2）
+# 这些是事实性数字，规整阶段一个都不能碰。两位以上的中文数字串整段保护；
+# 口吃（我我我 / 统一一下）是否顺滑，交给后面有上下文的 LLM 润色判断——
+# 它能分辨「统一一下」和「二二年」，正则不能。
+CN_DIGIT_CHARS = "零〇一二三四五六七八九"
+# 「幺」是读数字用的「1」（八八幺幺 = 88:11），同样属于不能压的数字读法
+RE_CN_DIGIT_RUN = re.compile(rf"[{CN_DIGIT_CHARS}幺]{{2,}}")
+
 FULLWIDTH_MAP = {
     "！": "！", "？": "？", "，": "，", "。": "。", "；": "；", "：": "：",
 }
@@ -73,13 +85,35 @@ def normalize(text: str) -> str:
     return t.strip()
 
 
-def strip_stutter(text: str) -> str:
-    """去掉明显的口吃重复：我我我 → 我；这个这个 → 这个。"""
+def _compress_stutter(text: str) -> str:
+    """对一段不含中文数字串的文本做叠字压缩。"""
     if not text:
-        return ""
+        return text
     t = RE_REPEAT_CJK.sub(r"\1", text)
     t = RE_REPEAT_WORD.sub(r"\1", t)
     return t
+
+
+def strip_stutter(text: str) -> str:
+    """去掉明显的口吃重复：我我我 → 我；这个这个 → 这个。
+
+    中文数字串（两位及以上）整段保护，不参与叠字压缩——年份、金额一旦被
+    压掉一位就是事实性错误。数字相关的口吃（统一一下）保留原样，由后面
+    有上下文的 LLM 润色顺带处理。
+    """
+    if not text:
+        return ""
+    if not RE_CN_DIGIT_RUN.search(text):
+        return _compress_stutter(text)
+
+    parts: List[str] = []
+    last = 0
+    for m in RE_CN_DIGIT_RUN.finditer(text):
+        parts.append(_compress_stutter(text[last:m.start()]))
+        parts.append(m.group(0))
+        last = m.end()
+    parts.append(_compress_stutter(text[last:]))
+    return "".join(parts)
 
 
 def _drop_token(text: str, token: str) -> str:
