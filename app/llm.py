@@ -29,6 +29,8 @@ POLISH_SYSTEM = """你是一名中文文稿编辑。你会收到一段演讲的�
 4. 保留讲者原始的段落意图，但允许合并碎句、补全标点，使句子通顺可读。
 5. 保留其中的专业术语、产品名、人名、地名，不要意译或改写专有名词。
 6. 严格保持条目数量与顺序：输入 N 条就必须输出 N 条，序号一一对应，不得遗漏、合并、拆分或新增。
+7. 四位年份必须完整保留：像"二零二零年""二零二二年"这类中文数字年份，转成阿拉伯数字时必须是 2020年、2022年，
+   不能写成"二零年"（丢位），也不能写成"2020-20年"。原文里的所有数字、百分比、金额、日期、编号一律不得改动或省略。
 
 输出格式（严格遵守）：每行一个 JSON 对象，不要加任何其他文字或代码块标记：
 {"i": 输入序号, "t": "改写后的文本"}
@@ -554,6 +556,10 @@ def polish_segments(
                 log.info("润色结果与原文不匹配（第 %d 条），保留原文", pos + 1)
                 out[i] = src
                 continue
+            if not _numbers_preserved(src, cand):
+                log.info("润色结果丢失原文数字（第 %d 条），保留原文", pos + 1)
+                out[i] = src
+                continue
             out[i] = cand
 
     for idx, seg in enumerate(segments):
@@ -576,6 +582,46 @@ def _aligned(src: str, cand: str, threshold: float = 0.30) -> bool:
     import difflib
 
     return difflib.SequenceMatcher(None, src, cand).ratio() >= threshold
+
+
+# 四位中文数字年份（如 二零二零 / 二零二二 / 二〇二五）
+_CN_YEAR_RE = re.compile(r"[零〇一二三四五六七八九]{4}(?=年)")
+_CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn_year_to_int(s: str) -> Optional[int]:
+    """把「二零二零」这样的中文数字年份转成 2020。"""
+    try:
+        return int("".join(str(_CN_DIGITS[c]) for c in s))
+    except (KeyError, ValueError):
+        return None
+
+
+def _numbers_preserved(src: str, cand: str) -> bool:
+    """校验润色结果没有丢数字。
+
+    模型偶尔会把四位中文数字年份读成三位（「二零二零年」→「二零年」），
+    年份是事实性信息，丢了就是硬伤，所以这里做硬校验：原文里的每个年份
+    （按数值比对，中文数字与阿拉伯数字等价）在改写后必须仍然存在。
+    """
+    src_years = set()
+    for m in _CN_YEAR_RE.finditer(src):
+        v = _cn_year_to_int(m.group(0))
+        if v is not None:
+            src_years.add(v)
+    if not src_years:
+        return True
+
+    cand_years = set()
+    for m in _CN_YEAR_RE.finditer(cand):
+        v = _cn_year_to_int(m.group(0))
+        if v is not None:
+            cand_years.add(v)
+    for m in re.finditer(r"(?<!\d)(19|20)\d{2}(?!\d)", cand):
+        cand_years.add(int(m.group(0)))
+
+    return src_years.issubset(cand_years)
 
 
 def max_tokens_for(idxs: Sequence[int], extra: int = 0) -> int:
