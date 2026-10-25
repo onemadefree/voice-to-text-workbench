@@ -417,14 +417,29 @@ def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
                 with urllib.request.urlopen(req, timeout=config.LLM_API_TIMEOUT) as resp:
                     data = json.loads(resp.read().decode("utf-8", "ignore"))
                 msg = (data.get("choices") or [{}])[0].get("message") or {}
+                choice = (data.get("choices") or [{}])[0]
                 # 推理型模型（如 MiniMax-M1/M2/M3）正文可能落在 reasoning_content
                 text = (msg.get("content") or "").strip()
                 if not text:
                     text = (msg.get("reasoning_content") or "").strip()
                 text = _strip_think(text)
-                if text:
+                # 推理模型可能把 max_tokens 全花在思考上，正文一个字都没有——
+                # 这种情况下必须让上层知道（否则会被当成"模型没改"）。
+                finish = choice.get("finish_reason")
+                if finish == "length" and not text:
+                    usage = data.get("usage") or {}
+                    log.warning(
+                        "响应被 max_tokens 截断（正文为空）：思考用了 %s token，"
+                        "上限 %s。条目要拆得更小。",
+                        (usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
+                        usage.get("completion_tokens"))
+                    last = "响应被 max_tokens 截断（思考耗尽预算）"
+                elif text:
+                    if finish == "length":
+                        log.warning("响应被 max_tokens 截断，正文可能不完整")
                     return text
-                last = "空响应"
+                else:
+                    last = "空响应"
             except urllib.error.HTTPError as exc:
                 # 带上响应体便于排查（原来只有状态码，看不出原因）
                 detail = ""
@@ -544,7 +559,7 @@ def polish_segments(
     batch: List[int] = []
     buf_len = 0
 
-    def flush(idxs: List[int]) -> None:
+    def flush(idxs: List[int], depth: int = 0) -> None:
         if not idxs:
             return
         lines = []
@@ -575,16 +590,34 @@ def polish_segments(
             # 拆成两半重来，小批量更容易成功，避免一批 16 段全退回原文。
             log.warning("润色批次 %d 条无结果，拆半重试", len(idxs))
             mid = len(idxs) // 2
-            flush(idxs[:mid])
-            flush(idxs[mid:])
+            flush(idxs[:mid], depth + 1)
+            flush(idxs[mid:], depth + 1)
             return
+        # 模型只写出了一部分条目：把没写到的拆小重试，别让它们白白退回规整稿。
+        # 零散段落最容易触发这个——模型要为每段单独推理，思考 token 会吃满
+        # 预算导致响应被截断（实测 12 条一批 reasoning_tokens 就到了 20220）。
+        handled = set(range(len(idxs)))
+        missing = [pos for pos in range(len(idxs)) if pos not in mapping]
+        if missing and len(missing) < len(idxs) and depth < 2:
+            log.info("润色批次只拿到 %d/%d 条，剩下 %d 条拆小重试",
+                     len(mapping), len(idxs), len(missing))
+            handled = set(range(len(idxs))) - set(missing)
+            sub = [idxs[p] for p in missing]
+            # 一次最多 4 条：条目越少模型想得越少，响应越不容易被截断
+            for k in range(0, len(sub), 4):
+                flush(sub[k:k + 4], depth + 1)
         for pos, i in enumerate(idxs):
+            if pos not in handled:
+                continue
             src = (segments[i].get("raw") or segments[i].get("text") or "").strip()
             # 原始转写稿（未经规整），数字保真的第二基准。
             # 规整阶段若把年份压坏一位（例如 二零二零年 → 二零年），
             # 候选结果即使过了 clean 基准的校验，也会被这里拦下来。
             orig = (segments[i].get("text") or "").strip()
-            cand = (mapping.get(pos) or "").strip()
+            # 模型回填的是提示词里给的编号（段落在本批中的绝对位置），
+            # 这里按位置取；若模型自行从 1 开始重新编号，再退回批内序号兜底。
+            # 早前只按批内序号取，第 2 批往后整批对不上号，模型的改写全被丢弃。
+            cand = (mapping.get(i) or mapping.get(pos) or "").strip()
             if not cand:
                 out[i] = _safe_base(src, orig)
                 continue

@@ -389,7 +389,16 @@ class Pipeline:
                     for j in idxs[max(0, g_start - 3):g_start]
                 )[:400]
 
-            results = polish_segments(llm, work, context_head=head)
+            # 零散段落（跨全篇挑选的定向重刷）比连续段落难想得多：模型要为每段
+            # 单独推理，思考 token 容易吃满预算导致响应被截断，只写出一部分条目。
+            # 所以定向重刷用 4 条一批，连续段落照常用 16 条。
+            span = (group[-1] - group[0] + 1) if len(group) > 1 else 1
+            sparse = span > len(group) * 2
+            batch_size = 4 if sparse else 16
+            if sparse:
+                log.info("定向重刷 %d 段（非连续），改用 %d 条一批",
+                         len(group), batch_size)
+            results = polish_segments(llm, work, context_head=head, batch_size=batch_size)
             for pos, i in enumerate(group):
                 segs[i]["polished"] = results[pos]
                 segs[i]["polish_level"] = level

@@ -27,6 +27,7 @@ PLAN = ROOT / "output" / "_repolish_plan.json"
 def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     no_kb = "--no-kb" in sys.argv
+    skip_polish = "--skip-polish" in sys.argv
     if not PLAN.exists():
         print("✗ 缺少重刷计划 output/_repolish_plan.json，先跑 _plan_repolish.py")
         return 1
@@ -63,11 +64,14 @@ def main() -> int:
 
         # 2) 定向重润色
         t0 = time.time()
-        pipeline.run_polish(doc_id, indices=idxs, level="standard",
-                            force_polish=True, backend=backend)
-        doc = store.load(doc_id) or {}
-        segs = doc.get("segments") or []
-        print(f"    重润色 {len(idxs)} 段，耗时 {(time.time() - t0) / 60:.1f} 分钟", flush=True)
+        if skip_polish:
+            print("    跳过重润色（--skip-polish）", flush=True)
+        else:
+            pipeline.run_polish(doc_id, indices=idxs, level="standard",
+                                force_polish=True, backend=backend)
+            doc = store.load(doc_id) or {}
+            segs = doc.get("segments") or []
+            print(f"    重润色 {len(idxs)} 段，耗时 {(time.time() - t0) / 60:.1f} 分钟", flush=True)
 
         # 3) 重建知识库
         kb = ""
