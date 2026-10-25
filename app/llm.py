@@ -536,6 +536,14 @@ def polish_segments(
             if raw_out.strip():
                 break
         mapping = _parse_indexed(raw_out, len(idxs))
+        if not mapping and len(idxs) > 1:
+            # 整批都没拿到结果（模型空回复 / 被 max_tokens 截断）：
+            # 拆成两半重来，小批量更容易成功，避免一批 16 段全退回原文。
+            log.warning("润色批次 %d 条无结果，拆半重试", len(idxs))
+            mid = len(idxs) // 2
+            flush(idxs[:mid])
+            flush(idxs[mid:])
+            return
         for pos, i in enumerate(idxs):
             src = (segments[i].get("raw") or segments[i].get("text") or "").strip()
             cand = (mapping.get(pos) or "").strip()
