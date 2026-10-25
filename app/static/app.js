@@ -93,6 +93,9 @@ async function init() {
   $('btnLlmClose').onclick = closeLlmPanel;
   $('btnLlmSave').onclick = saveLlmConfig;
   $('btnLlmTest').onclick = testLlmBackend;
+  $('btnLlmModels').onclick = fetchLlmModels;
+  $('cfgKey').onblur = autoProbeModels;
+  $('cfgBase').onblur = autoProbeModels;
   $('btnLlmClear').onclick = clearLlmConfig;
   $('cfgBackend').onchange = onCfgBackendChange;
   $('llmPanel').onclick = (e) => { if (e.target === $('llmPanel')) closeLlmPanel(); };
@@ -217,6 +220,8 @@ async function loadLlmConfig() {
 function onCfgBackendChange() {
   const id = $('cfgBackend').value;
   const presets = (state.llmCfg || {}).presets || {};
+  $('cfgModelList').innerHTML = '';   // 换了后端，旧的模型列表作废
+  probedSig = '';
   if (id === LLM_LOCAL) {
     $('cfgBase').value = '';
     $('cfgModel').value = '';
@@ -282,6 +287,64 @@ async function testLlmBackend() {
   } catch (e) {
     setLlmMsg('测试失败：' + e.message, true);
   }
+}
+
+/** 拉取服务端可用模型列表：填好地址和 Key 后点「🔍 拉取」。 */
+let probedSig = '';
+
+function probeSignature(v) {
+  return `${v.backend}|${v.base}|${v.api_key || 'saved-key'}`;
+}
+
+async function fetchLlmModels() {
+  const v = llmFormValues();
+  if (v.backend === LLM_LOCAL) {
+    setLlmMsg('本地模型不需要 API：直接用离线模型，无模型列表可拉');
+    return;
+  }
+  if (!v.base) {
+    setLlmMsg('请先填写接口地址 Base URL', true);
+    return;
+  }
+  const btn = $('btnLlmModels');
+  const dl = $('cfgModelList');
+  btn.disabled = true;
+  setLlmMsg('拉取模型列表中…');
+  try {
+    const r = await api('/api/llm/models', { method: 'POST', body: JSON.stringify(v) });
+    const list = r.models || [];
+    dl.innerHTML = '';
+    for (const m of list) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      dl.appendChild(opt);
+    }
+    if (!list.length) {
+      setLlmMsg('服务没返回可用模型，请手动填写模型名', true);
+      return;
+    }
+    probedSig = probeSignature(v);
+    // 当前填的模型在列表里就保留，否则自动选第一个
+    const keep = list.includes(v.model);
+    if (!keep) $('cfgModel').value = list[0];
+    setLlmMsg(keep
+      ? `获取到 ${list.length} 个模型，当前模型在列表中`
+      : `获取到 ${list.length} 个模型，已选中「${$('cfgModel').value}」`);
+  } catch (e) {
+    dl.innerHTML = '';
+    setLlmMsg('拉取失败：' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** 输入完 Key 或改完地址后自动探测一次（不用手点按钮）。 */
+async function autoProbeModels() {
+  const v = llmFormValues();
+  if (v.backend === LLM_LOCAL || !v.base) return;
+  if (!v.api_key && !(state.llmCfg || {}).has_key) return;   // 没有任何 Key 不探测
+  if (probeSignature(v) === probedSig) return;               // 同样的参数不重复请求
+  await fetchLlmModels();
 }
 
 async function clearLlmConfig() {

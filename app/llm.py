@@ -253,14 +253,129 @@ def _build_local_client():
     return generate, f"mlx-lm:{config.LLM_MODEL}"
 
 
+def _normalize_base(base: str) -> str:
+    """把用户填的地址归一化成 OpenAI 兼容的 base URL（自动补 /v1）。"""
+    b = (base or "").strip().rstrip("/")
+    if not b:
+        return ""
+    # 有人直接把 /chat/completions 整段贴进来，截掉后缀
+    for suffix in ("/chat/completions", "/completions"):
+        if b.endswith(suffix):
+            b = b[: -len(suffix)].rstrip("/")
+    if not b.endswith("/v1") and "/v1" not in b:
+        b += "/v1"
+    return b
+
+
+def _parse_model_names(data: Any) -> List[str]:
+    """从 /models 响应里提取模型名（兼容 data / models / result 等字段）。"""
+    items: Any = None
+    if isinstance(data, dict):
+        for key in ("data", "models", "result", "items"):
+            v = data.get(key)
+            if isinstance(v, list):
+                items = v
+                break
+    elif isinstance(data, list):
+        items = data
+
+    names: List[str] = []
+    seen = set()
+    for it in items or []:
+        name = ""
+        if isinstance(it, str):
+            name = it.strip()
+        elif isinstance(it, dict):
+            for key in ("id", "name", "model", "model_name", "slug"):
+                v = it.get(key)
+                if isinstance(v, str) and v.strip():
+                    name = v.strip()
+                    break
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def fetch_model_list(base: str, api_key: str = "", timeout: Optional[int] = None) -> List[str]:
+    """探测 OpenAI 兼容服务可用的模型列表（GET {base}/models）。
+
+    填了地址和 Key 就能列出候选模型，不用背模型名。
+    服务不提供 /models 时抛 RuntimeError（提示手填），不影响其他功能。
+    """
+    normalized = _normalize_base(base)
+    if not normalized:
+        raise RuntimeError("请先填写接口地址 Base URL")
+
+    raw = (base or "").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/completions"):
+        if raw.endswith(suffix):
+            raw = raw[: -len(suffix)].rstrip("/")
+    urls = [normalized + "/models"]
+    alt = raw + "/models"
+    if alt and alt not in urls:
+        urls.append(alt)
+
+    headers = {"Accept": "application/json", "User-Agent": "stt-workbench"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    tmo = timeout or config.LLM_API_TIMEOUT
+
+    last = ""
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=tmo) as resp:
+                data = json.loads(resp.read().decode("utf-8", "ignore"))
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", "ignore")[:200]
+            except Exception:
+                pass
+            if exc.code in (401, 403):
+                # 不回显响应体：个别服务会把请求内容原样吐回来
+                raise RuntimeError(f"鉴权失败（HTTP {exc.code}）：API Key 无效或无权限") from exc
+            if exc.code == 404:
+                last = "HTTP 404"
+                continue
+            last = f"HTTP {exc.code}: {body}"
+            continue
+        except Exception as exc:
+            last = f"{type(exc).__name__}: {exc}"
+            continue
+
+        names = _parse_model_names(data)
+        if names:
+            return names
+        last = "响应里没有模型列表"
+
+    raise RuntimeError(
+        f"拉不到模型列表（{last}）。该服务可能不提供 /models 接口，请手动填写模型名。"
+    )
+
+
+def resolve_probe_target(backend: str, override: Optional[Dict[str, str]] = None) -> tuple[str, str]:
+    """解析探测模型列表用的 (base, api_key)。
+
+    与 _resolve_online 同源，多一条兜底：地址和已保存配置一致时，
+    即使后端名不同也复用已保存的 Key，省得用户重复输入。
+    """
+    base, _model, key = _resolve_online(backend, override=override)
+    if not key:
+        user = load_user_config()
+        saved_base = (user.get("base") or "").strip().rstrip("/")
+        if saved_base and saved_base == base.strip().rstrip("/") and user.get("api_key"):
+            key = user["api_key"]
+    return base, key
+
+
 def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
     """任意 OpenAI 兼容服务（MiniMax / DeepSeek / 通义 / Kimi / 本地 server）。
 
     只用标准库 urllib 实现，不引入额外依赖；带指数退避重试。
     """
-    base_url = base.rstrip("/")
-    if not base_url.endswith("/v1") and "/v1" not in base_url:
-        base_url += "/v1"
+    base_url = _normalize_base(base)
     url = base_url + "/chat/completions"
     headers = {"Content-Type": "application/json", "User-Agent": "stt-workbench"}
     if api_key:

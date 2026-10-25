@@ -171,6 +171,26 @@ def save_llm_config(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any
             "message": "已保存，后续润色将使用该后端"}
 
 
+@app.post("/api/llm/models")
+def llm_models(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """探测在线服务可用的模型列表（填好地址/Key 就能拉，不用背模型名）。
+
+    传上来的 base/api_key 优先（未保存也能试），
+    没传则回落到已保存配置或该后端的预设地址。
+    """
+    from .llm import fetch_model_list, resolve_probe_target
+
+    backend = str(payload.get("backend") or "").strip().lower() or "local"
+    override = {k: str(payload.get(k) or "").strip() for k in ("base", "api_key")}
+    override = {k: v for k, v in override.items() if v}
+    base, api_key = resolve_probe_target(backend, override)
+    try:
+        names = fetch_model_list(base, api_key=api_key)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "base": base, "count": len(names), "models": names}
+
+
 @app.post("/api/llm/test")
 def test_llm(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     """连通性自检。可带上界面里尚未保存的 base/model/api_key 直接试连。"""
