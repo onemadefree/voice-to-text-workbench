@@ -25,7 +25,7 @@ LLM_MODEL = os.environ.get("STT_LLM_MODEL", "mlx-community/Qwen3-8B-4bit")
 
 # 构建标记：改动了服务行为（尤其是 LLM 实例复用/显存回收）时 +1，
 # 用来确认「跑着的服务」加载的是不是最新代码。
-APP_BUILD = os.environ.get("STT_APP_BUILD", "2026-10-25-thinkstrip-kbfix")
+APP_BUILD = os.environ.get("STT_APP_BUILD", "2026-10-26-dash-numfix-batchfix")
 
 # ---------------------------------------------------------------- 润色后端
 # local  = mlx-lm 本地推理（默认，全离线）

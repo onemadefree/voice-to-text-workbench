@@ -719,6 +719,7 @@ async function startTranscribe() {
       method: 'POST',
       body: JSON.stringify({
         id: state.docId,
+        name: state.files.find(f => f.id === state.docId)?.name || '',
         engine: $('engineSel').value,
         align: true,
         rules: true,

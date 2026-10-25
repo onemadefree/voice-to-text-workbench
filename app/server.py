@@ -103,6 +103,29 @@ def _export_srt(doc: Dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def _resolve_source(doc_id: str, name: str = "") -> Optional[Path]:
+    """把文档 id 解析成 source 目录下的音频文件。
+
+    文件列表给的是**不带扩展名**的 id（"张三-讲话"），而磁盘上是
+    "张三-讲话.mp3"。以前只按 id 找，找不到就回退到 source 目录本身，
+    结果探测音频直接失败——网页上点「开始转写」就是这么坏的。
+    这里按「id → name → 通配符」的顺序逐个试。
+    """
+    direct = config.SOURCE_DIR / doc_id
+    if direct.is_file():
+        return direct
+    if name:
+        candidate = config.SOURCE_DIR / str(name)
+        if candidate.is_file():
+            return candidate
+    # 按文件名主干匹配（支持 .mp3/.wav/.m4a 等）
+    matches = sorted(p for p in config.SOURCE_DIR.glob(f"{doc_id}.*")
+                     if p.is_file() and not p.name.startswith("."))
+    if matches:
+        return matches[0]
+    return None
+
+
 # ---------------------------------------------------------------- 接口
 
 @app.get("/", response_class=HTMLResponse)
@@ -308,14 +331,9 @@ def start_transcribe(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     doc_id = str(payload.get("id") or "").strip()
     if not doc_id:
         raise HTTPException(status_code=400, detail="缺少文件 id")
-    source = config.SOURCE_DIR / doc_id
-    if not source.exists():
-        # 允许直接传相对路径名（含扩展名）
-        candidate = config.SOURCE_DIR / (payload.get("name") or "")
-        if candidate.exists():
-            source = candidate
-        else:
-            raise HTTPException(status_code=404, detail=f"找不到源文件: {doc_id}")
+    source = _resolve_source(doc_id, payload.get("name"))
+    if source is None:
+        raise HTTPException(status_code=404, detail=f"找不到源文件: {doc_id}")
 
     engine = str(payload.get("engine") or "qwen3")
     language = payload.get("language") or None
