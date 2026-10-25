@@ -52,6 +52,26 @@ class Pipeline:
         self._threads: Dict[str, threading.Thread] = {}
         self._llms: Dict[str, object] = {}
 
+    # ------------------------------------------------------------ 状态上报
+    def _stage(self, doc_id: str, job: Job, stage: str, message: str,
+               kind: str = "asr", done: Optional[int] = None,
+               total: Optional[int] = None) -> None:
+        """更新内存里的作业状态，同时写一份状态文件（仪表盘用）。
+
+        写文件是关键：命令行脚本跑的任务，服务端也要看得见。
+        """
+        job.stage = stage
+        job.message = message
+        from .status import publish
+        publish(doc_id, kind, stage, message, done, total)
+
+    def _status(self, doc_id: str, kind: str, stage: str, message: str = "",
+                done: Optional[int] = None, total: Optional[int] = None,
+                error: str = "", finished: bool = False) -> None:
+        from .status import publish
+        publish(doc_id, kind, stage, message, done, total,
+                error=error, finished=finished)
+
     # ------------------------------------------------------------ 公共入口
     def start_transcribe(
         self,
@@ -76,12 +96,15 @@ class Pipeline:
                 self._transcribe(doc_id, source_path, engine, language, align, use_rules, force, hotwords, job)
                 job.stage = "done"
                 job.message = "完成"
+                self._status(doc_id, "asr", "done", "完成", finished=True)
             except Exception as exc:
                 log.exception("转写失败 %s", doc_id)
                 job.stage = "error"
                 job.error = f"{type(exc).__name__}: {exc}"
                 job.message = job.error
                 self.store.update(doc_id, status="error", error=job.error)
+                self._status(doc_id, "asr", "error", job.error,
+                             error=job.error, finished=True)
             finally:
                 job.finished_at = time.time()
 
@@ -151,8 +174,7 @@ class Pipeline:
         work.mkdir(parents=True, exist_ok=True)
 
         # ---- 媒体信息
-        job.stage = "probing"
-        job.message = "读取音频信息"
+        self._stage(doc_id, job, "probing", "读取音频信息")
         info = A.probe(source_path)
         media = info.to_dict()
 
@@ -166,13 +188,11 @@ class Pipeline:
         self.store.save(doc)
 
         # ---- 转码
-        job.stage = "converting"
-        job.message = "转码为 16kHz 单声道"
+        self._stage(doc_id, job, "converting", "转码为 16kHz 单声道")
         A.to_wav16k(source_path, wav)
 
         # ---- 切段
-        job.stage = "segmenting"
-        job.message = "静音检测与分段"
+        self._stage(doc_id, job, "segmenting", "静音检测与分段")
         noise_db = None
         if config.SILENCE_ADAPTIVE:
             noise_db = A.adaptive_silence_db(wav)
@@ -195,8 +215,7 @@ class Pipeline:
         # ---- 识别
         asr = build_engine(engine, language=language, use_aligner=align,
                            hotwords=list(hotwords or []) if hotwords else None)
-        job.stage = "loading_model"
-        job.message = "加载模型"
+        self._stage(doc_id, job, "loading_model", "加载模型")
         asr.load()
 
         # 断点续跑：按「块序号」归拢已有结果，块内句子整体复用。
@@ -263,6 +282,7 @@ class Pipeline:
             }
             self.store.save(doc)
             job.message = f"{done}/{total} 段"
+            self._status(doc_id, "asr", "recognizing", job.message, done, total)
 
         # ---- 去重（同一时间同一文本只保留一条）
         deduped = _dedupe_segments(segments)
@@ -279,8 +299,7 @@ class Pipeline:
 
         # ---- 规则清理
         if use_rules:
-            job.stage = "cleaning"
-            job.message = "口语清理"
+            self._stage(doc_id, job, "cleaning", "口语清理")
             self._apply_rules_to(doc)
 
         doc["status"] = "ready"
@@ -288,8 +307,7 @@ class Pipeline:
         self.store.save(doc)
 
         # ---- 预览与波形（后台做，不阻塞）
-        job.stage = "preview"
-        job.message = "生成预览音频与波形"
+        self._stage(doc_id, job, "preview", "生成预览音频与波形")
         try:
             self._build_preview(source_path, doc_id)
         except Exception as exc:
@@ -376,6 +394,9 @@ class Pipeline:
         llm = self.get_llm(backend)
         from .llm import polish_segments
 
+        self._status(doc_id, "polish", "polishing",
+                     f"{backend} 润色中" if backend else "本地 LLM 润色中",
+                     0, len(idxs))
         for g_start in range(0, len(idxs), group_size):
             group = idxs[g_start:g_start + group_size]
             work = [
@@ -408,8 +429,13 @@ class Pipeline:
                 "total": len(idxs),
             }
             self.store.save(doc)
+            self._status(doc_id, "polish", "polishing",
+                         f"{backend} 润色中" if backend else "本地 LLM 润色中",
+                         doc["polish_progress"]["done"], len(idxs))
 
         doc.pop("polish_progress", None)
+        self._status(doc_id, "polish", "done", "润色完成",
+                     len(idxs), len(idxs), finished=True)
         return self.store.save(doc)
 
     def run_knowledge_base(self, doc_id: str, title: str = "",
@@ -423,9 +449,11 @@ class Pipeline:
             return doc
         from .llm import build_knowledge_base
 
+        self._status(doc_id, "kb", "knowledge_base", "提炼知识库中")
         kb = build_knowledge_base(self.get_llm(backend), text,
                                   title=title or doc.get("source", ""))
         doc["knowledge_base"] = kb
+        self._status(doc_id, "kb", "done", "知识库完成", finished=True)
         return self.store.save(doc)
 
     # ------------------------------------------------------------ 预览资源

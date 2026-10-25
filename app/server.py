@@ -110,6 +110,44 @@ def index() -> HTMLResponse:
     return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
 
 
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard() -> HTMLResponse:
+    """工作状态仪表盘（作业进度 + 硬件占用）。"""
+    return HTMLResponse((STATIC_DIR / "dashboard.html").read_text(encoding="utf-8"))
+
+
+@app.get("/api/status")
+def status() -> Dict[str, Any]:
+    """仪表盘数据：所有作业（含命令行脚本跑的）+ 系统硬件指标。
+
+    作业状态来自 output/_status/*.json，任何进程写的都能被看到；
+    系统指标用 macOS 内建命令采集，失败就返回 null（界面显示「—」）。
+    """
+    import os
+    import time as _time
+    from .monitor import snapshot
+    from .status import read_all
+
+    jobs = read_all()
+    sys_info = snapshot()
+    # 给每个作业挂上它自己进程的 CPU/内存
+    procs = sys_info.get("processes") or {}
+    for job in jobs:
+        info = procs.get(str(job.get("pid")))
+        if info:
+            job["cpu_pct"] = info.get("cpu_pct")
+            job["rss_mb"] = info.get("rss_mb")
+    return {
+        "server": {
+            "pid": os.getpid(),
+            "build": config.APP_BUILD,
+            "now": _time.time(),
+        },
+        "jobs": jobs,
+        "system": sys_info,
+    }
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     return {

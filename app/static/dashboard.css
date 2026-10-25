@@ -1,0 +1,185 @@
+/* 状态仪表盘专属样式（与主界面共用 style.css 的配色变量） */
+.dash-body { overflow-y: auto; }
+
+.dash {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 20px 40px;
+}
+
+.dash .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(14, 17, 22, .92);
+  backdrop-filter: blur(8px);
+}
+
+.dash-link {
+  display: inline-block;
+  text-decoration: none;
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+.dash-link:hover { border-color: var(--accent); color: #fff; }
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.dash-card {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+
+.dash-card h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: .3px;
+}
+
+.dash-card h2.sec { margin-top: 20px; }
+
+.dash-wide { grid-column: 1 / -1; }
+
+/* ---------- 作业卡片 ---------- */
+.job-list { display: flex; flex-direction: column; gap: 10px; }
+
+.job {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 11px 13px;
+  background: var(--bg-soft);
+}
+.job.kind-asr { border-left-color: #7c5cff; }
+.job.kind-polish { border-left-color: var(--accent); }
+.job.kind-kb { border-left-color: var(--warn); }
+.job.state-done { border-left-color: var(--ok); }
+.job.state-error, .job.state-died { border-left-color: var(--err); }
+.job.state-stale { border-left-color: var(--warn); }
+
+.job-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.job-kind {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.job.state-done .job-kind { background: rgba(62, 207, 142, .14); color: var(--ok); }
+.job.state-error .job-kind, .job.state-died .job-kind { background: rgba(239, 83, 80, .14); color: var(--err); }
+.job-title { font-weight: 600; font-size: 13px; }
+.job-stage { font-size: 12px; color: var(--fg-dim); }
+.job-pct { margin-left: auto; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--fg-dim); }
+
+.job-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .07);
+  overflow: hidden;
+  margin: 9px 0 7px;
+}
+.job-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width .4s;
+}
+.job.state-done .job-bar > i { background: var(--ok); }
+.job.state-error .job-bar > i, .job.state-died .job-bar > i { background: var(--err); }
+
+.job-meta {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.job-meta b { color: var(--fg); font-weight: 600; }
+
+/* ---------- 完成列表 ---------- */
+.done-list { display: flex; flex-direction: column; gap: 6px; }
+.done-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--fg-dim);
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--bg-soft);
+}
+.done-row .ok { color: var(--ok); }
+.done-row .bad { color: var(--err); }
+.done-row .who { color: var(--fg); }
+
+/* ---------- 硬件仪表 ---------- */
+.meter-list { display: flex; flex-direction: column; gap: 13px; }
+.meter-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+.meter-top .val { color: var(--fg); font-variant-numeric: tabular-nums; }
+.meter-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .07);
+  overflow: hidden;
+}
+.meter-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width .4s;
+}
+.meter.gpu .meter-bar > i { background: #a06cff; }
+.meter.mem .meter-bar > i { background: var(--warn); }
+.meter.disk .meter-bar > i { background: var(--ok); }
+.meter.disk.low .meter-bar > i { background: var(--err); }
+.meter.unknown .meter-bar > i { background: var(--fg-dim); }
+
+.note { margin: 14px 0 0; line-height: 1.6; }
+
+/* ---------- 进程表 ---------- */
+.proc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.proc-table th {
+  text-align: left;
+  color: var(--fg-dim);
+  font-weight: 500;
+  font-size: 11px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.proc-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(42, 50, 62, .5);
+  font-variant-numeric: tabular-nums;
+}
+.proc-table tr:last-child td { border-bottom: none; }
+.proc-table .dim { color: var(--fg-dim); }
+
+.empty-note { color: var(--fg-dim); font-size: 12px; padding: 10px 2px; }
+
+@media (max-width: 860px) {
+  .dash-grid { grid-template-columns: 1fr; }
+}

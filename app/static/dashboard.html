@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>状态仪表盘 · 本地语音转文字工作台</title>
+<link rel="stylesheet" href="/static/style.css" />
+<link rel="stylesheet" href="/static/dashboard.css" />
+</head>
+<body class="dash-body">
+<div id="dash" class="dash">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">📊</span>
+      <div>
+        <h1>工作状态仪表盘</h1>
+        <p id="dashSub" class="muted">加载中…</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span id="dashFresh" class="muted small"></span>
+      <button id="btnRefresh" class="chip">立即刷新</button>
+      <a href="/" class="chip dash-link">返回工作台</a>
+    </div>
+  </header>
+
+  <main class="dash-grid">
+    <section class="dash-card dash-jobs">
+      <h2>正在运行</h2>
+      <div id="jobList" class="job-list"></div>
+      <h2 class="sec">最近完成</h2>
+      <div id="doneList" class="done-list"></div>
+    </section>
+
+    <section class="dash-card">
+      <h2>硬件占用</h2>
+      <div id="sysList" class="meter-list"></div>
+      <p class="muted small note">
+        GPU 为系统级占用（含浏览器等其他程序），不是本任务独占；
+        进程级 CPU 需在普通终端运行服务时才可采集。
+      </p>
+    </section>
+
+    <section class="dash-card dash-wide">
+      <h2>相关进程</h2>
+      <table class="proc-table">
+        <thead><tr><th>PID</th><th>类型</th><th>文档</th><th>CPU</th><th>内存</th><th>状态</th></tr></thead>
+        <tbody id="procBody"></tbody>
+      </table>
+    </section>
+  </main>
+</div>
+<script src="/static/dashboard.js"></script>
+</body>
+</html>
