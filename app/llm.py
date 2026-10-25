@@ -498,7 +498,7 @@ def polish_segments(
     context_head: str = "",
     batch_size: int = 16,
     max_chars: int = 2200,
-    align_threshold: float = 0.30,
+    align_threshold: float = 0.45,
 ) -> List[str]:
     """对原始文本批量润色，返回与 segments 等长的改写文本列表。
 
@@ -587,6 +587,41 @@ def max_tokens_for(idxs: Sequence[int], extra: int = 0) -> int:
     return max(1024, min(32768, len(idxs) * 320 + extra))
 
 
+def _iter_json_objects(text: str):
+    """从一段文本里逐个抠出 JSON 对象（容忍前后夹杂其它文字、单个对象截断）。
+
+    推理模型常在 JSON 行后面接思考文字，或把对象截断成 {"i":0,"t":"半个
+    ；按「整行必须是合法 JSON」来解析会把整批结果都丢掉。
+    """
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    yield json.loads(text[start:i + 1])
+                except Exception:
+                    pass
+                start = -1
+
+
 def _parse_indexed(raw: str, expect: int) -> Dict[int, str]:
     """解析带序号的润色输出，返回 {0 基序号: 文本}。
 
@@ -625,26 +660,25 @@ def _parse_indexed(raw: str, expect: int) -> Dict[int, str]:
             pass
 
     # ---- 方式二：JSON 行
+    # 推理模型经常在 JSON 后面接一段思考文字，或把 JSON 截断，
+    # 所以这里按「行内找 {…}」来提取，而不是要求整行正好是 JSON。
     for line in text.splitlines():
         line = line.strip()
-        if not line.startswith("{"):
+        if "{" not in line:
             continue
-        try:
-            obj = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        i = obj.get("i", obj.get("index"))
-        t = obj.get("t", obj.get("text"))
-        if t is None:
-            continue
-        if i is None:
-            i = len(result) + 1
-        try:
-            result[int(i) - 1] = str(t)
-        except (TypeError, ValueError):
-            continue
+        for obj in _iter_json_objects(line):
+            if not isinstance(obj, dict):
+                continue
+            i = obj.get("i", obj.get("index"))
+            t = obj.get("t", obj.get("text"))
+            if t is None:
+                continue
+            if i is None:
+                i = len(result) + 1
+            try:
+                result[int(i) - 1] = str(t)
+            except (TypeError, ValueError):
+                continue
     if result:
         return result
 
@@ -671,11 +705,8 @@ def _parse_numbered(raw: str, expect: int) -> Dict[int, str]:
     if current is not None:
         result[current] = "\n".join(buf).strip()
 
-    # 兜底：没有编号时按空行/整段切分
-    if not result:
-        parts = [p.strip() for p in re.split(r"\n{1,}", raw) if p.strip()]
-        for i, p in enumerate(parts[:expect]):
-            result[i] = p
+    # 不再按行/空行硬切兜底：模型的思考文字长度常常刚好等于预期条数，
+    # 硬切会把无关内容当成改写结果写进稿子。宁可这一批全部退回原文。
     # 编号异常时按顺序回填
     if result and sorted(result) != list(range(expect)):
         ordered = [result[k] for k in sorted(result)]

@@ -27,7 +27,7 @@ def main() -> int:
     ap.add_argument("doc_id", nargs="?", default=None, help="文档 id（默认取 source 下第一个）")
     ap.add_argument("--fix", action="store_true", help="重新润色错位段落")
     ap.add_argument("--kb", action="store_true", help="修复后重建知识库")
-    ap.add_argument("--threshold", type=float, default=0.30)
+    ap.add_argument("--threshold", type=float, default=0.45)
     args = ap.parse_args()
 
     store = DocumentStore()

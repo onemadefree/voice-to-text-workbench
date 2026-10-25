@@ -53,6 +53,27 @@ def main() -> int:
     check("仍解析出 2 条", len(p2), 2)
     check("内容正确", [p2.get(0), p2.get(1)], ["真一", "真二"])
 
+    print("· JSON 后面接思考文字（推理模型常见）")
+    raw3 = '{"i":1,"t":"改写一"}\nSome thinking about the answer\n{"i":2,"t":"改写二"}'
+    p3 = _parse_indexed(raw3, 2)
+    check("解析出 2 条", len(p3), 2)
+    check("内容正确", [p3.get(0), p3.get(1)], ["改写一", "改写二"])
+
+    print("· 整批都是思考文字时不能把乱码当改写结果")
+    raw4 = "We need answer strictly structure Chinese Markdown.\nMaybe the title is X.\nSo the bullets are..."
+    p4 = _parse_indexed(raw4, 3)
+    check("解析结果为空", p4, {})
+
+    print("· JSON 被截断时不能把半截内容塞进去")
+    raw5 = '{"i":1,"t":"算力是人工智能的基础'
+    p5 = _parse_indexed(raw5, 1)
+    check("截断的 JSON 不被采纳", p5, {})
+
+    print("· 段数不足时兜底切分不乱填")
+    raw6 = "只有一行文字"
+    p6 = _parse_indexed(raw6, 3)
+    check("不足 3 段不硬切", p6, {})
+
     print()
     if FAILED:
         print(f"✗ {len(FAILED)} 项未通过: {', '.join(FAILED)}")
