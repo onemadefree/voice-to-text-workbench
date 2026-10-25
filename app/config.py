@@ -37,6 +37,9 @@ LLM_API_KEY = os.environ.get("STT_LLM_API_KEY", "")
 LLM_API_MODEL = os.environ.get("STT_LLM_API_MODEL", "")
 LLM_API_TIMEOUT = float(os.environ.get("STT_LLM_API_TIMEOUT", "180"))
 LLM_API_RETRIES = int(os.environ.get("STT_LLM_API_RETRIES", "3"))
+# 单次调用的 token 上限。推理模型（M2/M3 系列）会先花掉几千 token 思考，
+# 上限给小了会 finish_reason=length 把正文一起砍没，所以默认给得比较宽。
+LLM_API_MAX_TOKENS = int(os.environ.get("STT_LLM_API_MAX_TOKENS", "16384"))
 
 # 常见 OpenAI 兼容服务预设：设 STT_LLM_BACKEND=minimax 即可切换
 LLM_PRESETS: dict = {

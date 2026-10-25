@@ -467,6 +467,15 @@ class LocalLLM:
             self._ensure()
         return self._info
 
+    @property
+    def budget_extra(self) -> int:
+        """推理模型（M2/M3 系列）的思考预算余量；本地模型不需要。"""
+        name = (self._backend or load_user_config().get("backend")
+                or config.LLM_BACKEND or "local").strip().lower()
+        if name in ("local", "mlx", "mlx-lm"):
+            return 0
+        return config.LLM_API_MAX_TOKENS
+
     def _ensure(self):
         if self._generate is None:
             with self._lock:
@@ -514,9 +523,12 @@ def polish_segments(
             f"严格保持 {len(idxs)} 条、顺序与序号不变。\n\n{body}"
         )
         raw_out = ""
+        budget = getattr(llm, "budget_extra", 0)
         for system in (POLISH_SYSTEM, POLISH_SYSTEM_FALLBACK):
             try:
-                raw_out = llm.complete(prompt, system, max_tokens=max_tokens_for(idxs), temperature=0.25)
+                raw_out = llm.complete(prompt, system,
+                                       max_tokens=max_tokens_for(idxs, extra=budget),
+                                       temperature=0.25)
             except Exception as exc:
                 log.warning("润色批次失败: %s", exc)
                 raw_out = ""
@@ -558,9 +570,13 @@ def _aligned(src: str, cand: str, threshold: float = 0.30) -> bool:
     return difflib.SequenceMatcher(None, src, cand).ratio() >= threshold
 
 
-def max_tokens_for(idxs: Sequence[int]) -> int:
-    # 推理模型会先花掉一部分 token 思考，给足上限免得正文被截
-    return max(1024, min(8192, len(idxs) * 400))
+def max_tokens_for(idxs: Sequence[int], extra: int = 0) -> int:
+    """单次调用的 token 上限。
+
+    extra 是给推理模型（M2/M3 系列）预留的思考预算：它们的思考会先吃掉几千
+    token，上限给小了会 finish_reason=length 把正文一起砍没。
+    """
+    return max(1024, min(32768, len(idxs) * 320 + extra))
 
 
 def _parse_indexed(raw: str, expect: int) -> Dict[int, str]:
@@ -703,12 +719,13 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
     size = 2600
     parts = [full_text[i:i + size] for i in range(0, len(full_text), size)]
     notes: List[str] = []
+    budget = getattr(llm, "budget_extra", 0)
     for idx, part in enumerate(parts):
         try:
             out = llm.complete(
                 f"这是演讲稿的第 {idx + 1}/{len(parts)} 部分：\n\n{part}",
                 CHUNK_SYSTEM,
-                max_tokens=1400,
+                max_tokens=1400 + budget,
                 temperature=0.2,
             )
         except Exception as exc:
@@ -726,7 +743,7 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
             merged = llm.complete(
                 f"以下是演讲稿各部分的要点，请去重合并：\n\n{merged}",
                 CHUNK_SYSTEM,
-                max_tokens=2600,
+                max_tokens=2600 + budget,
                 temperature=0.2,
             )
         except Exception:
@@ -742,7 +759,8 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
     out = ""
     for attempt in range(2):
         try:
-            out = llm.complete(prompt, KB_SYSTEM, max_tokens=8192, temperature=0.2)
+            out = llm.complete(prompt, KB_SYSTEM,
+                               max_tokens=max(8192, budget), temperature=0.2)
         except Exception as exc:
             log.warning("知识库生成失败: %s", exc)
             out = ""
