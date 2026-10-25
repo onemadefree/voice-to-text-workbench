@@ -94,6 +94,7 @@ async function init() {
   $('btnLlmSave').onclick = saveLlmConfig;
   $('btnLlmTest').onclick = testLlmBackend;
   $('btnLlmModels').onclick = fetchLlmModels;
+  $('cfgModelPick').onchange = () => { $('cfgModel').value = $('cfgModelPick').value; };
   $('cfgKey').onblur = autoProbeModels;
   $('cfgBase').onblur = autoProbeModels;
   $('btnLlmClear').onclick = clearLlmConfig;
@@ -210,6 +211,7 @@ async function loadLlmConfig() {
   const p = presets[cur] || {};
   $('cfgBase').value = cur === LLM_LOCAL ? '' : (cfg.base || p.base || '');
   $('cfgModel').value = cur === LLM_LOCAL ? '' : (cfg.model || p.model || '');
+  fillModelOptions([], '');   // 重新打开时清掉上次的候选列表
 
   if (cfg.saved) {
     setLlmMsg(`当前配置：${cur}${cfg.has_key ? ' · Key ' + cfg.key_hint : ''}`);
@@ -220,7 +222,7 @@ async function loadLlmConfig() {
 function onCfgBackendChange() {
   const id = $('cfgBackend').value;
   const presets = (state.llmCfg || {}).presets || {};
-  $('cfgModelList').innerHTML = '';   // 换了后端，旧的模型列表作废
+  fillModelOptions([], '');   // 换了后端，旧的模型列表作废
   probedSig = '';
   if (id === LLM_LOCAL) {
     $('cfgBase').value = '';
@@ -307,35 +309,44 @@ async function fetchLlmModels() {
     return;
   }
   const btn = $('btnLlmModels');
-  const dl = $('cfgModelList');
   btn.disabled = true;
   setLlmMsg('拉取模型列表中…');
   try {
     const r = await api('/api/llm/models', { method: 'POST', body: JSON.stringify(v) });
     const list = r.models || [];
-    dl.innerHTML = '';
-    for (const m of list) {
-      const opt = document.createElement('option');
-      opt.value = m;
-      dl.appendChild(opt);
-    }
+    fillModelOptions(list, v.model);
     if (!list.length) {
       setLlmMsg('服务没返回可用模型，请手动填写模型名', true);
       return;
     }
     probedSig = probeSignature(v);
-    // 当前填的模型在列表里就保留，否则自动选第一个
     const keep = list.includes(v.model);
     if (!keep) $('cfgModel').value = list[0];
-    setLlmMsg(keep
-      ? `获取到 ${list.length} 个模型，当前模型在列表中`
-      : `获取到 ${list.length} 个模型，已选中「${$('cfgModel').value}」`);
+    setLlmMsg(`获取到 ${list.length} 个模型，已填入「${$('cfgModel').value}」，可在下方下拉框里改`);
   } catch (e) {
-    dl.innerHTML = '';
+    fillModelOptions([], '');
     setLlmMsg('拉取失败：' + e.message, true);
   } finally {
     btn.disabled = false;
   }
+}
+
+/** 把拉到的模型灌进下拉框：一次列全，选中即填进上方模型名输入框。 */
+function fillModelOptions(list, current) {
+  const sel = $('cfgModelPick');
+  sel.innerHTML = '';
+  if (!list || !list.length) {
+    sel.classList.add('hidden');
+    return;
+  }
+  for (const m of list) {
+    const opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = m;
+    sel.appendChild(opt);
+  }
+  sel.classList.remove('hidden');
+  sel.value = (current && list.includes(current)) ? current : list[0];
 }
 
 /** 输入完 Key 或改完地址后自动探测一次（不用手点按钮）。 */

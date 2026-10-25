@@ -137,10 +137,10 @@
       <label class="field">
         <span>模型名</span>
         <div class="row-inline">
-          <input id="cfgModel" type="text" list="cfgModelList" placeholder="MiniMax-Text-01" />
+          <input id="cfgModel" type="text" placeholder="MiniMax-Text-01" />
           <button id="btnLlmModels" class="chip" type="button" title="按当前地址与 Key 拉取服务端可用模型">🔍 拉取</button>
         </div>
-        <datalist id="cfgModelList"></datalist>
+        <select id="cfgModelPick" class="hidden" title="拉取到的可用模型，选中即填入上方"></select>
         <small class="muted">填好地址和 Key 后点「拉取」自动列出可用模型；也可直接手动填写</small>
       </label>
       <label class="field">
