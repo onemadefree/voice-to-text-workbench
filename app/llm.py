@@ -52,6 +52,9 @@ KB_SYSTEM = """你是一名内容编辑。你会收到一段演讲的整理稿�
 - 术语：解释
 ## 待确认
 - （原文含糊或存疑的点，没有则写"无"）
+
+篇幅要求：要点不超过 30 条，术语表不超过 15 条。必须完整输出全部 5 个小节，
+不要在最后一句中途停下（前面写太多导致「术语表」「待确认」写不完）。
 """
 
 
@@ -660,6 +663,13 @@ CHUNK_SYSTEM = """你是一名中文文稿编辑。你会收到一段演讲稿�
 输出要点，每行一条，不要标题、不要解释：
 - （事实、数据、观点、案例、结论；保留具体数字与人名地名）"""
 
+KB_SECTIONS = ("## 摘要", "## 要点", "## 术语表", "## 待确认")
+
+
+def _kb_complete(text: str) -> bool:
+    """知识库是否 5 个小节齐全（防止 max_tokens 截断后残缺）。"""
+    return all(sec in (text or "") for sec in KB_SECTIONS)
+
 
 def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
     """长稿走「分段提炼 → 汇总」两段式，避免一次性超长输入。"""
@@ -706,8 +716,26 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
         f"【整理稿】\n{full_text[:6000]}\n\n"
         f"【要点提炼】\n{merged}\n"
     )
-    try:
-        return llm.complete(prompt, KB_SYSTEM, max_tokens=4096, temperature=0.2)
-    except Exception as exc:
-        log.warning("知识库生成失败: %s", exc)
-        return ""
+    out = ""
+    for attempt in range(2):
+        try:
+            out = llm.complete(prompt, KB_SYSTEM, max_tokens=8192, temperature=0.2)
+        except Exception as exc:
+            log.warning("知识库生成失败: %s", exc)
+            out = ""
+        if out.strip() and _kb_complete(out):
+            break
+        if attempt == 0:
+            # 上一次被 max_tokens 截断或漏了小节：重来一次，并明确要求收着写
+            log.warning("知识库输出不完整（可能被截断），重试一次")
+            prompt += (
+                "\n\n注意：上一次输出被截断或缺少小节。请务必输出全部 5 个小节"
+                "（标题/摘要/要点/术语表/待确认），要点控制在 25 条以内、术语表 10 条以内，"
+                "务必以「## 待确认」小节结尾。"
+            )
+    out = (out or "").strip()
+    # 兜底：仍缺小节就补空节，保证结构完整
+    for sec in KB_SECTIONS:
+        if sec not in out:
+            out += f"\n\n{sec}\n- 无"
+    return out

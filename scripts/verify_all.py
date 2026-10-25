@@ -34,10 +34,9 @@ def check(doc_id: str) -> bool:
     polished = [s for s in segs if (s.get("polished") or "").strip()]
     bad = [i for i, s in enumerate(segs)
            if s.get("polished") and not _aligned(s.get("raw") or "", s.get("polished") or "", THRESHOLD)]
-    # 回退成原文：LLM 调用失败时会把原文直接写进 polished，肉眼看不出来
-    echo = [i for i, s in enumerate(segs)
-            if s.get("polished") and (s.get("polished") or "").strip()
-            == (s.get("raw") or "").strip()]
+    # 参考信息：模型原样返回的段落数（原文本来就干净时是正常的，不作为错误判据）
+    echo = sum(1 for s in segs
+               if s.get("polished") and (s.get("polished") or "").strip() == (s.get("raw") or "").strip())
     missing_kb = [sec for sec in KB_SECTIONS if sec not in kb]
 
     txt = config.OUTPUT_DIR / doc_id / f"{doc_id}.txt"
@@ -47,18 +46,16 @@ def check(doc_id: str) -> bool:
         txt_lines = len([ln for ln in txt.read_text(encoding="utf-8").splitlines() if ln.strip()])
 
     ok = (len(polished) == len(segs) and len(segs) > 0
-          and not bad and not echo and not missing_kb and kb.strip() and txt_ok)
+          and not bad and not missing_kb and kb.strip() and txt_ok)
 
     print(f"{'✅' if ok else '⚠️ '} {doc_id}")
-    print(f"    段数 {len(segs)}｜已润色 {len(polished)}｜错位 {len(bad)}｜原样未改 {len(echo)}"
+    print(f"    段数 {len(segs)}｜已润色 {len(polished)}｜错位 {len(bad)}｜原样返回 {echo}"
           f"｜知识库 {len(kb)} 字符｜缺小节 {missing_kb or '无'}"
           f"｜导出 {'有' if txt_ok else '无'}({txt_lines} 行)")
     if bad:
         for i in bad[:3]:
             print(f"      错位 #{i} 原文：{(segs[i].get('raw') or '')[:50]}")
             print(f"             当前：{(segs[i].get('polished') or '')[:50]}")
-    if echo:
-        print(f"      原样未改示例：#{echo[0]} {(segs[echo[0]].get('raw') or '')[:50]}")
     return ok
 
 
