@@ -102,7 +102,14 @@ class Pipeline:
                 job.stage = "error"
                 job.error = f"{type(exc).__name__}: {exc}"
                 job.message = job.error
-                self.store.update(doc_id, status="error", error=job.error)
+                # 已经转出过内容的文档，不要因为这一次失败就被标成「出错」：
+                # 旧数据（段落、润色、知识库）都还在，标错会让界面误报，
+                # 还会把错误状态写回文件、把好数据的 status 顶掉。
+                cur = self.store.load(doc_id) or {}
+                if cur.get("segments"):
+                    self.store.update(doc_id, last_error=job.error)
+                else:
+                    self.store.update(doc_id, status="error", error=job.error)
                 self._status(doc_id, "asr", "error", job.error,
                              error=job.error, finished=True)
             finally:

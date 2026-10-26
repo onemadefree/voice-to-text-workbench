@@ -277,11 +277,19 @@ def list_files() -> Dict[str, Any]:
             doc = store.load(doc_id)
             info = {}
             if doc:
+                status = doc.get("status")
+                # 自愈：早先一次失败的转写会把整篇标成「出错」，可内容其实都在
+                # （源文件找不到时会回退去探测 source 目录，报 "Is a directory"）。
+                # 界面是按 status 上色的，所以这里按实际产物纠正。
+                if status == "error" and (doc.get("segments") or []):
+                    status = "ready"
                 info = {
-                    "status": doc.get("status"),
+                    "status": status,
                     "progress": doc.get("progress"),
                     "segments": len(doc.get("segments") or []),
                     "has_kb": bool(doc.get("knowledge_base")),
+                    "last_error": doc.get("last_error") or (
+                        doc.get("error") if doc.get("status") == "error" else ""),
                 }
             items.append({
                 "id": doc_id,
