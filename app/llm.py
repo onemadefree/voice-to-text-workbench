@@ -31,6 +31,10 @@ POLISH_SYSTEM = """你是一名中文文稿编辑。你会收到一段演讲的�
 6. 严格保持条目数量与顺序：输入 N 条就必须输出 N 条，序号一一对应，不得遗漏、合并、拆分或新增。
 7. 四位年份必须完整保留：像"二零二零年""二零二二年"这类中文数字年份，转成阿拉伯数字时必须是 2020年、2022年，
    不能写成"二零年"（丢位），也不能写成"2020-20年"。原文里的所有数字、百分比、金额、日期、编号一律不得改动或省略。
+8. 年份的还原要结合上下文判断：语音识别有时把年份写坏，例如"二五二五年""七六二五年""二六二六年"，
+   逐位读是 2525/7625/2626，但讲者说的其实是 2025年/2026年——要结合上下文还原成正确的阿拉伯数字年份，
+   绝不能按字面转成 2525年、7625年这种不存在的年份。反过来，真实存在的历史年份
+   （如"一六七九年""一八四七年""一八四八年"＝1679/1847/1848）要如实保留成 1679年、1847年、1848年，不要改成 20XX 年。
 
 输出格式（严格遵守）：每行一个 JSON 对象，不要加任何其他文字或代码块标记：
 {"i": 输入序号, "t": "改写后的文本"}
@@ -696,9 +700,13 @@ def _aligned(src: str, cand: str, threshold: float = 0.30) -> bool:
 
 
 # 四位中文数字年份（如 二零二零 / 二零二二 / 二〇二五）
-_CN_YEAR_RE = re.compile(r"[零〇一二三四五六七八九]{4}(?=年)")
+# 语音识别偶尔会写成 5 位（多一个「二」：二二零二三年），值取最后 4 位。
+_CN_YEAR_RE = re.compile(r"[零〇一二三四五六七八九]{4,5}(?=年)")
 _CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
               "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+# 现代年份的值域。语音识别把年份写坏时（「二五二五年」其实是 2025 年）
+# 错值落在这个区间之外——这种值不能拿来卡模型，否则模型改对了反被判丢年份。
+PLAUSIBLE_YEAR_RANGE = (1900, 2100)
 
 
 def _cn_year_to_int(s: str) -> Optional[int]:
@@ -709,30 +717,65 @@ def _cn_year_to_int(s: str) -> Optional[int]:
         return None
 
 
+def _years_of(text: str) -> set:
+    """文本里的年份数值：中文数字年份 + 阿拉伯数字年份。"""
+    out = set()
+    for m in _CN_YEAR_RE.finditer(text or ""):
+        v = _cn_year_to_int(m.group(0)[-4:])
+        if v is not None:
+            out.add(v)
+    # 任何 4 位阿拉伯数字都算年份候选（含 1679/1847 这类历史年份）
+    for m in re.finditer(r"(?<!\d)\d{4}(?!\d)", text or ""):
+        out.add(int(m.group(0)))
+    return out
+
+
+def _year_repair(v: int) -> Optional[int]:
+    """写坏的年份可能的还原值：「二五二五年」→ 2525 → 2025。
+
+    语音识别把「二零二五」写成「二五二五」时，逐位读是 2525，但按
+    「20 + 后两位」还原才是 2025。这里只给出候选，不做决定——
+    真年份（1679/1847/1848）也得靠模型结合上下文判断，程序不替它猜。
+    """
+    tail = v % 100
+    cand = 2000 + tail
+    lo, hi = PLAUSIBLE_YEAR_RANGE
+    if lo <= cand <= hi:
+        return cand
+    return None
+
+
 def _numbers_preserved(src: str, cand: str) -> bool:
     """校验润色结果没有丢数字。
 
     模型偶尔会把四位中文数字年份读成三位（「二零二零年」→「二零年」），
     年份是事实性信息，丢了就是硬伤，所以这里做硬校验：原文里的每个年份
     （按数值比对，中文数字与阿拉伯数字等价）在改写后必须仍然存在。
+
+    校验分两种情况：
+    - 合理年份（1900~2100，如 2025/2026）：必须原样存活；
+    - 不合理的年份（语音识别写坏的，如「二五二五年」逐位读是 2525）：
+      只要模型把它还原成合理的年份就算过，否则模型改对了反而会被判成
+      丢年份、整段退回原文——这正是高太山/王峰那几处年份修不掉的根因。
     """
-    src_years = set()
-    for m in _CN_YEAR_RE.finditer(src):
-        v = _cn_year_to_int(m.group(0))
-        if v is not None:
-            src_years.add(v)
-    if not src_years:
-        return True
-
-    cand_years = set()
-    for m in _CN_YEAR_RE.finditer(cand):
-        v = _cn_year_to_int(m.group(0))
-        if v is not None:
-            cand_years.add(v)
-    for m in re.finditer(r"(?<!\d)(19|20)\d{2}(?!\d)", cand):
-        cand_years.add(int(m.group(0)))
-
-    return src_years.issubset(cand_years)
+    lo, hi = PLAUSIBLE_YEAR_RANGE
+    src_all = _years_of(src)
+    cand_years = _years_of(cand)
+    for v in src_all:
+        if lo <= v <= hi:
+            # 合理年份：必须还在（中文写法或阿拉伯写法都算）
+            if v not in cand_years:
+                return False
+            continue
+        # 不合理年份：原样留着（可能是 1679 这种真历史年份），
+        # 或者被还原成合理年份，都算过
+        if v in cand_years:
+            continue
+        rep = _year_repair(v)
+        if rep is not None and rep in cand_years:
+            continue
+        return False
+    return True
 
 
 # 真正的数字才算数：三位以上的数字串、跟单位相邻的两位数字串、阿拉伯数字。
@@ -752,8 +795,12 @@ def _digit_weight(text: str) -> int:
 
     模型把「二零二零」写成「2020」重量不变（4→4），把「二零二零年」写成
     「二零年」重量减半（4→2），所以可以据此判断有没有丢数字。
+
+    年份串统一按 4 位算：语音识别偶尔多写一个字（「二二零二三年」），
+    那是写坏了而不是多了一个信息，按 5 位算会把正确的改写（2023年）误判成丢数字。
     """
-    return sum(len(m.group(0)) for m in RE_NUM_TOKEN.finditer(text or ""))
+    text = _CN_YEAR_RE.sub(lambda m: "〇" * 4, text or "")
+    return sum(len(m.group(0)) for m in RE_NUM_TOKEN.finditer(text))
 
 
 def _digits_intact(src: str, cand: str) -> bool:
