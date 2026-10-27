@@ -433,14 +433,21 @@ def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
                     data = json.loads(resp.read().decode("utf-8", "ignore"))
                 msg = (data.get("choices") or [{}])[0].get("message") or {}
                 choice = (data.get("choices") or [{}])[0]
-                # 推理型模型（如 MiniMax-M1/M2/M3）正文可能落在 reasoning_content
-                text = (msg.get("content") or "").strip()
-                if not text:
-                    text = (msg.get("reasoning_content") or "").strip()
-                text = _strip_think(text)
+                finish = choice.get("finish_reason")
+                # 推理型模型（如 MiniMax-M1/M2/M3）正文可能落在 reasoning_content，
+                # 但**正文为空且响应被截断**时，reasoning_content 里是半截思考过程，
+                # 不是答案——原实现把它当答案返回，结果 29k 字的思考过程被当成了
+                # 知识库/润色结果写进稿子。这里只在正常结束时才回退。
+                content = (msg.get("content") or "").strip()
+                reasoning = (msg.get("reasoning_content") or "").strip()
+                if content:
+                    text = _strip_think(content)
+                elif reasoning and finish != "length":
+                    text = _strip_think(reasoning)
+                else:
+                    text = ""
                 # 推理模型可能把 max_tokens 全花在思考上，正文一个字都没有——
                 # 这种情况下必须让上层知道（否则会被当成"模型没改"）。
-                finish = choice.get("finish_reason")
                 if finish == "length" and not text:
                     usage = data.get("usage") or {}
                     log.warning(
