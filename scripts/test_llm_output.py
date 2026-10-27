@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.llm import _parse_indexed, _strip_think  # noqa: E402
+from app.llm import _parse_indexed, _parse_numbered, _strip_think  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -46,6 +46,24 @@ def main() -> int:
     check("解析出 2 条", len(parsed), 2)
     check("第 1 条内容", parsed.get(0), "改写一")
     check("第 2 条内容", parsed.get(1), "改写二")
+
+    print("· 模型的批注不能混进正文")
+    # 模型不按 JSON 输出时，会先复述原文再写「口语：…」「改写：…」的批注
+    raw6 = ('1. 能通过越权的方式直接拿到更上一级的基础信息。\n'
+            '- 口语："一些这种"、"啊"等。\n'
+            '- 改写：能通过越权的方式直接获取更上一级的基础信息。')
+    p6 = _parse_numbered(raw6, 1)
+    check("批注被剔除，只留正文", p6.get(0), "能通过越权的方式直接拿到更上一级的基础信息。")
+    check("正文里不含「口语：」", "口语" not in (p6.get(0) or ""), True)
+
+    raw7 = ('1. 原文：这是第一段。\n'
+            '   口语：去掉"啊"。改写：这是第一段。')
+    p7 = _parse_numbered(raw7, 1)
+    check("首行就是批注的条目整条丢掉", p7.get(0), None)
+
+    raw8 = '1. 正常的一段话。\n2. 另一段话。'
+    p8 = _parse_numbered(raw8, 2)
+    check("正常编号格式不受影响", [p8.get(0), p8.get(1)], ["正常的一段话。", "另一段话。"])
 
     print("· 思考块里带编号也不能把解析带偏")
     raw2 = '<think>1. 这是思考\n2. 也是思考</think>\n{"i":1,"t":"真一"}\n{"i":2,"t":"真二"}'

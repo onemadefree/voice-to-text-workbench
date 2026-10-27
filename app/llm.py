@@ -24,6 +24,7 @@ POLISH_SYSTEM = """你是一名中文文稿编辑。你会收到一段演讲的�
 
 严格要求：
 1. 只做纠错与润色，不得增加原文没有的信息，不得改变讲者的观点、数字和结论。
+   （唯一例外：把明显写坏的年份还原成正确写法，见第 8 条，不算「改变数字」）
 2. 修正同音字、错别字、专有名词错误（结合上下文判断；中文数字年份/百分比/数量要转成阿拉伯数字，如"二零二五年"→"2025年"；英文专有名词按通行写法，如 "R and D" → "R&D"）。
 3. 去掉口语表达：语气词（嗯、呃、啊、那个、然后就是）、口头禅、重复、自我修正的痕迹。
 4. 保留讲者原始的段落意图，但允许合并碎句、补全标点，使句子通顺可读。
@@ -35,6 +36,9 @@ POLISH_SYSTEM = """你是一名中文文稿编辑。你会收到一段演讲的�
    逐位读是 2525/7625/2626，但讲者说的其实是 2025年/2026年——要结合上下文还原成正确的阿拉伯数字年份，
    绝不能按字面转成 2525年、7625年这种不存在的年份。反过来，真实存在的历史年份
    （如"一六七九年""一八四七年""一八四八年"＝1679/1847/1848）要如实保留成 1679年、1847年、1848年，不要改成 20XX 年。
+
+9. 只输出改写后的文本本身。不要复述原文，不要写「口语：…」「改写：…」「去掉…」「保留…」这类
+   修改说明、批注或理由，也不要加引号以外的任何标记——那些内容会被当成正文写进稿子。
 
 输出格式（严格遵守）：每行一个 JSON 对象，不要加任何其他文字或代码块标记：
 {"i": 输入序号, "t": "改写后的文本"}
@@ -544,6 +548,15 @@ class LocalLLM:
 
 _NUM_RE = re.compile(r"^(\d{1,3})\.\s*(.*)$", re.S)
 
+# 模型的批注行：它有时不按 JSON 输出，而是先复述原文再写「口语：…」「改写：…」
+# 的修改说明。这些不是正文，解析时必须剔除（不然会写进稿子里）。
+_NOTE_LINE_RE = re.compile(
+    r"^\s*[-*•]\s"                      # - xxx / * xxx 列表项
+    r"|口语\s*[:：]|改写\s*[:：]|润色\s*[:：]|修正\s*[:：]|整理\s*[:：]"
+    r"|原文\s*[:：]|原句\s*[:：]|注意\s*[:：]|可以去掉|直接改为|可以保留"
+    r"|这句比较完整|保留[「\"“]|去掉[「\"“]"
+)
+
 # 整批润色失败时的拆半上限：连续这么多次整批没结果就放弃本组，
 # 拆半的深度上限。这两个值是防止「服务一挂就指数级放大请求量」的保护。
 MAX_EMPTY_BATCHES = 4
@@ -917,23 +930,50 @@ def _parse_indexed(raw: str, expect: int) -> Dict[int, str]:
 
 
 def _parse_numbered(raw: str, expect: int) -> Dict[int, str]:
-    """解析「1. xxx」编号格式，返回 {序号(0基): 文本}。"""
+    """解析「1. xxx」编号格式，返回 {序号(0基): 文本}。
+
+    模型有时不按 JSON 输出，而是先复述原文、再写「口语：…」「改写：…」的
+    批注。这些批注不是正文——原实现把批注行一起收进条目，结果「- 改写：…」
+    这种模型的思考笔记被当成润色结果写进了稿子（实测 53 段）。现在：
+    - 遇到批注行就停止收集（正文保留批注之前的部分）；
+    - 首行本身就是批注的条目整条丢掉，交给上层退回原文或拆小重试。
+    """
     result: Dict[int, str] = {}
     if not raw:
         return result
-    current = None
+    current: Optional[int] = None
     buf: List[str] = []
+    entry_bad = False
+    stopped = False
+
+    def _flush() -> None:
+        nonlocal current, buf, entry_bad, stopped
+        if current is not None and not entry_bad and buf:
+            result[current] = "\n".join(buf).strip()
+        current, buf, entry_bad, stopped = None, [], False, False
+
     for line in raw.splitlines():
         m = _NUM_RE.match(line.strip())
         if m:
-            if current is not None:
-                result[current] = "\n".join(buf).strip()
+            _flush()
             current = int(m.group(1)) - 1
-            buf = [m.group(2).strip()]
-        elif current is not None:
-            buf.append(line.strip())
-    if current is not None:
-        result[current] = "\n".join(buf).strip()
+            body = m.group(2).strip()
+            if _NOTE_LINE_RE.search(body):
+                entry_bad = True
+                buf = []
+            else:
+                buf = [body]
+            continue
+        if current is None or entry_bad or stopped:
+            continue
+        s = line.strip()
+        if not s:
+            continue
+        if _NOTE_LINE_RE.search(s):
+            stopped = True
+            continue
+        buf.append(s)
+    _flush()
 
     # 不再按行/空行硬切兜底：模型的思考文字长度常常刚好等于预期条数，
     # 硬切会把无关内容当成改写结果写进稿子。宁可这一批全部退回原文。
