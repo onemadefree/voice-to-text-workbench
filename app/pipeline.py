@@ -530,8 +530,18 @@ class Pipeline:
         self._status(doc_id, "kb", "knowledge_base", "提炼知识库中",
                      model=model_name, backend=backend_name,
                      meta={"backend": backend_name})
-        kb = build_knowledge_base(self.get_llm(backend), text,
-                                  title=title or doc.get("source", ""))
+        # 标题用文件名去掉后缀：不然知识库的标题会带「.mp3」
+        title = title or Path(doc.get("source") or "").stem or doc_id
+        kb = build_knowledge_base(self.get_llm(backend), text, title=title)
+        if not kb.strip():
+            # 提炼失败（模型吐了思考过程 / 被截断）：别写空壳，
+            # 把作业标成失败，让人看得见——原来标「完成」，空壳能一直混下去。
+            self._status(doc_id, "kb", "error",
+                         "知识库生成失败：模型输出不是结构化知识库",
+                         finished=True, model=model_name, backend=backend_name,
+                         meta={"backend": backend_name})
+            log.warning("知识库生成失败，保留原有知识库")
+            return self.store.save(doc)
         doc["knowledge_base"] = kb
         self._status(doc_id, "kb", "done", "知识库完成", finished=True,
                      model=model_name, backend=backend_name,

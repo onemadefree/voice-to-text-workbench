@@ -103,14 +103,22 @@ def main() -> int:
     print("· 被截断：重试 + 兜底补节")
     llm = FakeLLM(TRUNCATED_KB)
     out = build_knowledge_base(llm, "演讲正文。" * 500, title="测试")
-    check("重试到 2 次", llm.summary_calls, 2)
+    check("重试到 3 次", llm.summary_calls, 3)
     check("最终 5 节齐全", _kb_complete(out), True)
     check("缺的小节被补上", "## 待确认" in out and "## 术语表" in out, True)
 
-    print("· 汇总调用失败：兜底补节")
+    print("· 汇总调用失败：判失败，不补空节")
     llm = FakeLLM(TRUNCATED_KB, fail_summary_times=99)
     out = build_knowledge_base(llm, "演讲正文。" * 500, title="测试")
-    check("仍 5 节齐全", _kb_complete(out), True)
+    check("返回空而不是 46 字符空壳", out.strip(), "")
+
+    print("· 模型吐思考过程时不能当知识库收下")
+    reasoning = ("我们需要从用户提供的演讲整理稿和要点提炼中，提炼成结构化的知识库资料。"
+                  "输出严格使用给定的 Markdown 结构：# 标题，## 摘要，## 要点，## 术语表，## 待确认。")
+    check("复述结构的思考过程不算完整", _kb_complete(reasoning), False)
+    llm = FakeLLM(reasoning)
+    out = build_knowledge_base(llm, "演讲正文。" * 500, title="测试")
+    check("思考过程不会被当成知识库", out.strip(), "")
 
     print("· max_tokens 足够")
     llm = FakeLLM(FULL_KB)

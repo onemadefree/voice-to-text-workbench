@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -50,14 +51,21 @@ def main() -> int:
         pipeline.run_knowledge_base(doc_id, title=doc.get("source", ""), backend=backend)
         doc = store.load(doc_id) or {}
         kb = doc.get("knowledge_base") or ""
-        missing = [s for s in SECTIONS if s not in kb]
+        # 小节必须行首出现 + 有标题行：子串包含会把「模型吐思考过程」判成合格品
+        missing = [s for s in SECTIONS
+                   if not re.search(r"(?m)^" + re.escape(s) + r"\s*$", kb)]
+        has_title = bool(re.search(r"(?m)^#\s+\S", kb))
         empty = kb.count("- 无")
-        print(f"  {len(kb)} 字符｜缺小节 {missing or '无'}｜「- 无」{empty} 处", flush=True)
-        if not kb.strip() or missing or empty >= 3:
+        print(f"  {len(kb)} 字符｜缺小节 {missing or '无'}｜无标题 {not has_title}｜「- 无」{empty} 处", flush=True)
+        kbmd = config.OUTPUT_DIR / doc_id / f"{doc_id}.kb.md"
+        if not kb.strip() or missing or not has_title or empty >= 3:
             print("  ✗ 仍然退化，需要换后端再试")
+            # 别把上一次的旧文件留在那儿——它可能是模型吐的思考过程，会被误当知识库
+            if kbmd.exists():
+                kbmd.unlink()
+                print(f"  已删除过期的 {kbmd.name}（内容不是知识库）")
             rc = 1
             continue
-        kbmd = config.OUTPUT_DIR / doc_id / f"{doc_id}.kb.md"
         kbmd.write_text(kb if kb.endswith("\n") else kb + "\n", encoding="utf-8")
         print(f"  ✓ 导出 {kbmd.name}", flush=True)
     return rc

@@ -75,6 +75,8 @@ KB_SYSTEM = """你是一名内容编辑。你会收到一段演讲的整理稿�
 - 原文说"总书记"就写"总书记"，不要自行补全成具体人名；反之亦然
 - 不要添加原文没有的引语、出处、数字或结论
 - 原文含糊的地方写进「待确认」，不要靠常识补全
+
+直接输出知识库本身，第一行就是 "# 标题"。不要输出思考过程、分析、复述要求或任何说明文字。
 """
 
 
@@ -1019,11 +1021,34 @@ CHUNK_SYSTEM = """你是一名中文文稿编辑。你会收到一段演讲稿�
 - （事实、数据、观点、案例、结论；保留具体数字与人名地名）"""
 
 KB_SECTIONS = ("## 摘要", "## 要点", "## 术语表", "## 待确认")
+# 小节标题必须出现在**行首**：之前用「子串包含」判，模型把提示词里的
+# 「## 摘要」复述一遍就算通过——一篇全是思考过程的知识库被当成了合格品
+# （组织变革管理与变革领导力-程建刚就是这样蒙混过关的）。
+_KB_HEADING_RE = re.compile(r"(?m)^#\s+\S")
+_KB_SECTION_RES = {s: re.compile(r"(?m)^" + re.escape(s) + r"\s*$")
+                   for s in KB_SECTIONS}
 
 
 def _kb_complete(text: str) -> bool:
-    """知识库是否 5 个小节齐全（防止 max_tokens 截断后残缺）。"""
-    return all(sec in (text or "") for sec in KB_SECTIONS)
+    """知识库是否结构齐全（防止 max_tokens 截断后残缺）。
+
+    判据要严：要有 # 标题，4 个小节必须**行首**出现。子串包含不算数——
+    模型有时把提示词里的结构复述一遍就当正文输出（29k 字的思考过程），
+    用子串判会把这种垃圾当合格品收下。
+    """
+    t = text or ""
+    if not _KB_HEADING_RE.search(t):
+        return False
+    return all(rx.search(t) for rx in _KB_SECTION_RES.values())
+
+
+def _kb_looks_like_kb(text: str) -> bool:
+    """这段输出至少长得像个知识库（有标题行），只是小节不全。
+
+    用于区分「模型写了一半被截断」（可以补空节）和「模型吐了一堆思考
+    过程」（不是知识库，补空节只会得到空壳，应该判失败）。
+    """
+    return bool(_KB_HEADING_RE.search(text or ""))
 
 
 # 常见的政治/人物专名：知识库里出现但原文没有 = 模型自行补全，属于加戏
@@ -1201,7 +1226,7 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
     extra = ""
     merged_cap = len(merged)
     out = ""
-    for attempt in range(2):
+    for attempt in range(3):
         prompt = (
             f"{title_hint}以下是演讲整理稿及要点提炼，请产出结构化的知识库资料。\n\n"
             f"【整理稿】\n{full_text[:6000]}\n\n"
@@ -1218,18 +1243,26 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
             continue
         if out.strip() and _kb_complete(out) and not _kb_adds_names(out, full_text):
             break
-        if attempt == 0:
-            # 上一次被 max_tokens 截断或漏了小节：重来一次，并明确要求收着写
-            log.warning("知识库输出不完整（可能被截断），重试一次")
+        if attempt < 2:
+            # 上一次被截断 / 漏了小节 / 干脆吐了思考过程：重来一次并说清要什么
+            log.warning("知识库输出不合规（截断或不是知识库结构），重试")
             extra = (
-                "\n\n注意：上一次输出被截断或缺少小节。请务必输出全部 5 个小节"
-                "（标题/摘要/要点/术语表/待确认），要点控制在 25 条以内、术语表 10 条以内，"
-                "务必以「## 待确认」小节结尾。"
+                "\n\n注意：上一次输出不合规——要么被截断，要么把思考过程当成正文输出了。"
+                "这次请直接输出知识库本身：第一行是「# 标题」，然后依次是"
+                "「## 摘要」「## 要点」「## 术语表」「## 待确认」这四个行首标题，"
+                "标题下写条目（要点用「- 」开头）。要点控制在 25 条以内、术语表 10 条以内，"
+                "务必以「## 待确认」小节结尾。不要输出任何思考过程或说明文字。"
                 "另外只写原文里真实出现过的人名与称谓，不要自行补全。"
             )
     out = (out or "").strip()
-    # 兜底：仍缺小节就补空节，保证结构完整
-    for sec in KB_SECTIONS:
-        if sec not in out:
-            out += f"\n\n{sec}\n- 无"
+    if not _kb_complete(out):
+        if _kb_looks_like_kb(out):
+            # 写了一半被截断：补空节，保证结构完整
+            for sec in KB_SECTIONS:
+                if not _KB_SECTION_RES[sec].search(out):
+                    out += f"\n\n{sec}\n- 无"
+        else:
+            # 根本不是知识库（模型的思考过程）：宁可判失败，也别把垃圾当知识库收下
+            log.warning("模型输出不是知识库结构（疑似思考过程），判失败")
+            return ""
     return out

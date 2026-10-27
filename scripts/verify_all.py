@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -23,14 +24,20 @@ THRESHOLD = 0.30
 
 
 def _kb_body(kb: str, section: str) -> str:
-    """取某个小节的正文（去掉标题行）。"""
-    if section not in kb:
-        return ""
-    tail = kb.split(section, 1)[1]
-    nxt = [tail.find(s) for s in KB_SECTIONS if tail.find(s) > 0]
-    if nxt:
-        tail = tail[:min(nxt)]
-    return tail.strip()
+    """取某个小节的正文（去掉标题行）。按行首标题切，别按子串切。"""
+    lines = (kb or "").splitlines()
+    out: list[str] = []
+    in_sec = False
+    for ln in lines:
+        if re.match(r"^#{1,6}\s", ln):
+            if in_sec:
+                break
+            if ln.strip() == section:
+                in_sec = True
+            continue
+        if in_sec:
+            out.append(ln)
+    return "\n".join(out).strip()
 
 
 def _kb_degenerate(kb: str) -> bool:
@@ -71,7 +78,11 @@ def check(doc_id: str) -> bool:
     # 参考信息：模型原样返回的段落数（原文本来就干净时是正常的，不作为错误判据）
     echo = sum(1 for s in segs
                if s.get("polished") and (s.get("polished") or "").strip() == (s.get("raw") or "").strip())
-    missing_kb = [sec for sec in KB_SECTIONS if sec not in kb]
+    # 小节必须**行首**出现：子串包含会把「模型把提示词里的结构复述一遍」
+    # 的思考过程当成合格知识库（程建刚那篇就是这样蒙混过关的）。
+    missing_kb = [sec for sec in KB_SECTIONS
+                  if not re.search(r"(?m)^" + re.escape(sec) + r"\s*$", kb)]
+    kb_no_title = not re.search(r"(?m)^#\s+\S", kb)
     kb_degenerate = _kb_degenerate(kb)
 
     txt = config.OUTPUT_DIR / doc_id / f"{doc_id}.txt"
@@ -85,13 +96,15 @@ def check(doc_id: str) -> bool:
 
     ok = (len(polished) == len(segs) and len(segs) > 0
           and not bad and not lost_num and not lost_clean
-          and not missing_kb and not kb_degenerate and kb.strip() and txt_ok and txt_match)
+          and not missing_kb and not kb_no_title and not kb_degenerate
+          and kb.strip() and txt_ok and txt_match)
 
     print(f"{'✅' if ok else '⚠️ '} {doc_id}")
     print(f"    段数 {len(segs)}｜已润色 {len(polished)}｜错位 {len(bad)}｜丢数字 {len(lost_num)}"
           f"｜规整丢数字 {len(lost_clean)}｜原样返回 {echo}"
           f"｜知识库 {len(kb)} 字符｜缺小节 {missing_kb or '无'}"
           f"｜{'⚠️知识库退化' if kb_degenerate else '知识库正常'}"
+          f"{'｜⚠️缺标题' if kb_no_title else ''}"
           f"｜导出 {'有' if txt_ok else '无'}({txt_lines} 行{'，与稿一致' if txt_match else '，⚠️与稿不一致'})")
     if bad:
         for i in bad[:3]:
