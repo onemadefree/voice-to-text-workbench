@@ -962,27 +962,43 @@ def _extract_part(llm: LocalLLM, part: str, label: str, budget: int) -> str:
 
 
 def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
-    """长稿走「分段提炼 → 汇总」两段式，避免一次性超长输入。"""
+    """长稿走「分段提炼 → 汇总」两段式，避免一次性超长输入。
+
+    分段提炼默认并发跑：长稿能切出几十段，串行的话慢模型（内网 27B 之类）
+    要串行几十分钟到几小时，单段还容易撞上超时。并发之后同样的量只要几分钟。
+    """
     if not full_text.strip():
         return ""
 
-    # ---- 第一步：分段提炼
+    # ---- 第一步：分段提炼（并发）
     size = 2600
     parts = [full_text[i:i + size] for i in range(0, len(full_text), size)]
-    notes: List[str] = []
+    notes: List[Optional[str]] = [None] * len(parts)
     budget = getattr(llm, "budget_extra", 0)
-    for idx, part in enumerate(parts):
+    workers = max(1, min(int(config.LLM_KB_WORKERS), len(parts)))
+
+    def _work(idx: int) -> None:
         try:
-            out = _extract_part(llm, part, f"第 {idx + 1}/{len(parts)} 部分", budget)
+            out = _extract_part(llm, parts[idx], f"第 {idx + 1}/{len(parts)} 部分", budget)
         except Exception as exc:
             log.warning("分段提炼失败 (%d/%d): %s", idx + 1, len(parts), exc)
-            continue
-        if out.strip():
-            notes.append(out.strip())
-    if not notes:
+            out = ""
+        notes[idx] = out
+
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(_work, range(len(parts))))
+    else:
+        for idx in range(len(parts)):
+            _work(idx)
+
+    keep = [n.strip() for n in notes if n and n.strip()]
+    if not keep:
         return ""
 
-    merged = "\n".join(notes)
+    merged = "\n".join(keep)
     # 合并后仍过长时再压一轮
     if len(merged) > 9000:
         try:

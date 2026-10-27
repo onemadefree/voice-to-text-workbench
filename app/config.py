@@ -41,6 +41,8 @@ LLM_API_RETRIES = int(os.environ.get("STT_LLM_API_RETRIES", "3"))
 # 单次调用的 token 上限。推理模型（M2/M3 系列）会先花掉几千 token 思考，
 # 上限给小了会 finish_reason=length 把正文一起砍没，所以默认给得比较宽。
 LLM_API_MAX_TOKENS = int(os.environ.get("STT_LLM_API_MAX_TOKENS", "16384"))
+# 知识库「分段提炼」的并发数。长稿能切出几十段，串行跑慢模型要等很久。
+LLM_KB_WORKERS = int(os.environ.get("STT_LLM_KB_WORKERS", "4"))
 
 # 常见 OpenAI 兼容服务预设：设 STT_LLM_BACKEND=minimax 即可切换
 LLM_PRESETS: dict = {
