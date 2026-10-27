@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.llm import _parse_indexed, _parse_numbered, _strip_think  # noqa: E402
+from app.llm import _parse_indexed, _parse_numbered, _strip_think, _strip_wrapper_quotes  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -70,6 +70,18 @@ def main() -> int:
     p2 = _parse_indexed(_strip_think(raw2), 2)
     check("仍解析出 2 条", len(p2), 2)
     check("内容正确", [p2.get(0), p2.get(1)], ["真一", "真二"])
+
+    print("· 模型给整段加的引号要剥掉")
+    check("直引号剥掉", _strip_wrapper_quotes("这是原文。", '"这是改写。"'), "这是改写。")
+    check("中文引号剥掉", _strip_wrapper_quotes("这是原文。", "“这是改写。”"), "这是改写。")
+    check("原文本来就有引号则保留",
+          _strip_wrapper_quotes('"他说“这是真的”。"', '"他说“这是真的”。"'),
+          '"他说“这是真的”。"')
+    check("剥外层直引号时保留原文里的中文引号",
+          _strip_wrapper_quotes("他说“这是真的”。", '"他说“这是真的”。"'),
+          "他说“这是真的”。")
+    check("没有引号不动", _strip_wrapper_quotes("原文", "改写"), "改写")
+    check("引号内为空不动", _strip_wrapper_quotes("原文", '""'), '""')
 
     print("· JSON 后面接思考文字（推理模型常见）")
     raw3 = '{"i":1,"t":"改写一"}\nSome thinking about the answer\n{"i":2,"t":"改写二"}'

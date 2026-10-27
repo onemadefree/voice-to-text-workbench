@@ -39,6 +39,11 @@ POLISH_SYSTEM = """你是一名中文文稿编辑。你会收到一段演讲的�
 
 9. 只输出改写后的文本本身。不要复述原文，不要写「口语：…」「改写：…」「去掉…」「保留…」这类
    修改说明、批注或理由，也不要加引号以外的任何标记——那些内容会被当成正文写进稿子。
+10. 两位中文数字年份也要转成阿拉伯数字："二五年"→2025年、"九零年"→1990年、"一七年"→2017年。
+   对应关系：00~26 年对应 20XX 年，27~99 年对应 19XX 年。
+   但表示时长、约数或年龄的说法不要转——"三五年前""七八年了""五六年前""活了一百零三年"
+   里的数字是时长/年龄/区间，不是年份，保持原样不动。
+11. 不要给改写后的整段加引号。原文中没有引号的，输出里也不要出现引号。
 
 输出格式（严格遵守）：每行一个 JSON 对象，不要加任何其他文字或代码块标记：
 {"i": 输入序号, "t": "改写后的文本"}
@@ -665,6 +670,7 @@ def polish_segments(
             # 这里按位置取；若模型自行从 1 开始重新编号，再退回批内序号兜底。
             # 早前只按批内序号取，第 2 批往后整批对不上号，模型的改写全被丢弃。
             cand = (mapping.get(i) or mapping.get(pos) or "").strip()
+            cand = _strip_wrapper_quotes(src, cand)
             if not cand:
                 out[i] = _safe_base(src, orig)
                 continue
@@ -688,6 +694,27 @@ def polish_segments(
         buf_len += text_len
     flush(batch)
     return out
+
+
+def _strip_wrapper_quotes(src: str, cand: str) -> str:
+    """去掉模型给整段加的引号。
+
+    模型有时把改写结果用一对引号包起来输出。原文没有引号时，这就是凭空
+    加的——写进稿子里很扎眼（实测 24 段）。原文本来就有引号的（讲者在引述）
+    保持原样。
+    """
+    t = (cand or "").strip()
+    if len(t) < 4:
+        return t
+    for lq, rq in (("\"", "\""), ("“", "”")):
+        if not (t.startswith(lq) and t.endswith(rq)):
+            continue
+        if (src or "").strip().startswith(lq):
+            return t          # 原文本来就是引述，保留
+        inner = t[1:-1].strip()
+        if inner:
+            return inner
+    return t
 
 
 def _safe_base(src: str, orig: str) -> str:
