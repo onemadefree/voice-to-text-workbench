@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from app import config  # noqa: E402
 from app.llm import LocalLLM, load_user_config  # noqa: E402
 from app.pipeline import Pipeline  # noqa: E402
+from app.status import job_running  # noqa: E402
 from app.store import DocumentStore, segment_final_text  # noqa: E402
 
 
@@ -37,10 +38,23 @@ def main() -> int:
         if doc is None:
             print(f"✗ {doc_id}: 找不到文档")
             continue
+
+        # 别的进程正在处理这篇（比如用户自己在网页上点了润色）→ 别碰，
+        # 两个进程同时改同一个 transcript.json 会互相覆盖。
+        if job_running(doc_id):
+            print(f"⏭ {doc_id}: 另一个进程正在处理，跳过")
+            continue
+
         segs = doc.get("segments") or []
         t0 = time.time()
-        print(f"=== {doc_id}（{len(segs)} 段）开始重刷 ===", flush=True)
-        pipeline.run_polish(doc_id, level="standard", force_polish=True, backend=backend)
+        polished_all = bool(segs) and all((s.get("polished") or "").strip() for s in segs)
+        kb_empty = not (doc.get("knowledge_base") or "").strip()
+        if polished_all and kb_empty:
+            # 已经有人润色完了，只差知识库——别把几小时的润色再跑一遍。
+            print(f"=== {doc_id}（{len(segs)} 段）已润色过，只补知识库 ===", flush=True)
+        else:
+            print(f"=== {doc_id}（{len(segs)} 段）开始重刷 ===", flush=True)
+            pipeline.run_polish(doc_id, level="standard", force_polish=True, backend=backend)
         doc = store.load(doc_id) or {}
         segs = doc.get("segments") or []
         echo = sum(1 for s in segs

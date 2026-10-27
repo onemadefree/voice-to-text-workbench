@@ -172,6 +172,24 @@ def read_all() -> List[Dict[str, Any]]:
     return jobs
 
 
+def job_running(doc_id: str) -> bool:
+    """这篇当前有没有别的进程在处理（没写结束标记，且进程还活着）。
+
+    用来避免两个进程同时润色同一篇——比如用户自己在网页上点了润色，
+    而后台脚本也想跑一遍。
+    """
+    path = _path(doc_id)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if data.get("finished_at"):
+        return False
+    return _pid_alive(data.get("pid"))
+
+
 def clear_finished() -> int:
     """清掉过期与已结束的状态文件。"""
     n = 0
