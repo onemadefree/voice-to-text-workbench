@@ -991,6 +991,51 @@ def _extract_part(llm: LocalLLM, part: str, label: str, budget: int) -> str:
         return ""
 
 
+# 「要点提炼」的长度上限。最终汇总提示词 = 整理稿前 6000 字 + merged，
+# 而内网引擎的上下文只有 32768 token（中文 1 字≈1 token）：merged 一旦
+# 超过两万多字就会 context_length_exceeded，整篇知识库退化成空壳。
+KB_MERGE_LIMIT = 9000
+# 合并要点时单次请求的切片大小——保证「合并」这一步自己也不会撞上下文上限。
+KB_MERGE_SLICE = 6000
+
+
+def _compress_notes(llm: LocalLLM, merged: str, budget: int) -> str:
+    """把各段要点合并去重。
+
+    merged 可能几万字（长稿 20 段 × 每段 2000 字）。原来一次性塞进提示词，
+    「合并」这一步自己就先撞上引擎的上下文上限——异常被吞掉后 merged 原样
+    返回，最终汇总再炸一次，整篇知识库只剩空壳。所以这里按 KB_MERGE_SLICE
+    切片，各自压缩后再拼接；某一批失败就退回该批原文，不丢内容。
+    """
+    slices = [merged[i:i + KB_MERGE_SLICE] for i in range(0, len(merged), KB_MERGE_SLICE)]
+
+    def _one(idx: int) -> str:
+        chunk = slices[idx]
+        try:
+            out = llm.complete(
+                f"以下是演讲稿各部分的要点（第 {idx + 1}/{len(slices)} 批），"
+                f"请去重合并：\n\n{chunk}",
+                CHUNK_SYSTEM,
+                max_tokens=2600 + budget,
+                temperature=0.2,
+            )
+            return out.strip() if out and out.strip() else chunk
+        except Exception as exc:
+            log.warning("要点合并第 %d/%d 批失败，保留原文: %s",
+                        idx + 1, len(slices), exc)
+            return chunk
+
+    workers = max(1, min(int(config.LLM_KB_WORKERS), len(slices)))
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            outs = list(pool.map(_one, range(len(slices))))
+    else:
+        outs = [_one(i) for i in range(len(slices))]
+    return "\n".join(x for x in outs if x.strip())
+
+
 def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
     """长稿走「分段提炼 → 汇总」两段式，避免一次性超长输入。
 
@@ -1029,39 +1074,40 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
         return ""
 
     merged = "\n".join(keep)
-    # 合并后仍过长时再压一轮
-    if len(merged) > 9000:
-        try:
-            merged = llm.complete(
-                f"以下是演讲稿各部分的要点，请去重合并：\n\n{merged}",
-                CHUNK_SYSTEM,
-                max_tokens=2600 + budget,
-                temperature=0.2,
-            )
-        except Exception:
-            pass
+    # 合并后仍过长时再压一轮（切片压，不会自己撞上下文上限）
+    if len(merged) > KB_MERGE_LIMIT:
+        merged = _compress_notes(llm, merged, budget)
+    # 兜底：压不动就截断。整理稿 6000 字 + merged 必须留在引擎上下文里，
+    # 否则最终汇总会 context_length_exceeded，知识库只剩 46 字符的空壳。
+    if len(merged) > KB_MERGE_LIMIT:
+        merged = merged[:KB_MERGE_LIMIT]
 
     # ---- 第二步：结构化汇总
     title_hint = f"标题：{title}\n\n" if title else ""
-    prompt = (
-        f"{title_hint}以下是演讲整理稿及要点提炼，请产出结构化的知识库资料。\n\n"
-        f"【整理稿】\n{full_text[:6000]}\n\n"
-        f"【要点提炼】\n{merged}\n"
-    )
+    extra = ""
+    merged_cap = len(merged)
     out = ""
     for attempt in range(2):
+        prompt = (
+            f"{title_hint}以下是演讲整理稿及要点提炼，请产出结构化的知识库资料。\n\n"
+            f"【整理稿】\n{full_text[:6000]}\n\n"
+            f"【要点提炼】\n{merged[:merged_cap]}\n" + extra
+        )
         try:
             out = llm.complete(prompt, KB_SYSTEM,
                                max_tokens=max(8192, budget), temperature=0.2)
         except Exception as exc:
             log.warning("知识库生成失败: %s", exc)
             out = ""
+            # 多半是上下文装不下（要点太长）→ 砍掉一半要点再试
+            merged_cap = merged_cap // 2
+            continue
         if out.strip() and _kb_complete(out) and not _kb_adds_names(out, full_text):
             break
         if attempt == 0:
             # 上一次被 max_tokens 截断或漏了小节：重来一次，并明确要求收着写
             log.warning("知识库输出不完整（可能被截断），重试一次")
-            prompt += (
+            extra = (
                 "\n\n注意：上一次输出被截断或缺少小节。请务必输出全部 5 个小节"
                 "（标题/摘要/要点/术语表/待确认），要点控制在 25 条以内、术语表 10 条以内，"
                 "务必以「## 待确认」小节结尾。"

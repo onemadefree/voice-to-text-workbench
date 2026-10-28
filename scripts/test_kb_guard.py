@@ -62,6 +62,32 @@ class FakeLLM:
         return "- 分段要点一\n- 分段要点二"
 
 
+class ContextLLM:
+    """模拟有上下文上限的假 LLM：提示词超长就报 context_length_exceeded。
+
+    内网引擎的上下文只有 32768 token。长稿的「要点合并」如果不切片，
+    这一步自己就先超限，异常被吞掉后 merged 原样带回，最终汇总再超一次，
+    整篇知识库就退化成 46 字符的空壳。这里用提示词长度上限复现这个坑。
+    """
+
+    def __init__(self, limit: int = 16000, summary: str = FULL_KB) -> None:
+        self.limit = limit
+        self.summary = summary
+        self.longest = 0
+        self.merge_prompts: list[int] = []
+
+    def complete(self, prompt, system, max_tokens=2048, temperature=0.3):
+        self.longest = max(self.longest, len(prompt))
+        if len(prompt) > self.limit:
+            raise RuntimeError("context_length_exceeded")
+        if "知识库" in system:
+            return self.summary
+        if "去重合并" in prompt:
+            self.merge_prompts.append(len(prompt))
+            return "- 要点合并后的简明结论"
+        return "- 分段要点" * 300
+
+
 def main() -> int:
     print("· _kb_complete 判定")
     check("完整的算完整", _kb_complete(FULL_KB), True)
@@ -90,6 +116,15 @@ def main() -> int:
     llm = FakeLLM(FULL_KB)
     build_knowledge_base(llm, "演讲正文。" * 500, title="测试")
     check("汇总 max_tokens >= 8192", llm.max_tokens_seen[0] >= 8192, True)
+
+    print("· 上下文上限：要点合并要切片，不能自己就超限")
+    llm = ContextLLM()
+    out = build_knowledge_base(llm, "演讲正文。" * 6000, title="测试")
+    check("走过分段提炼的合并", len(llm.merge_prompts) > 0, True)
+    check("合并是切片的", max(llm.merge_prompts or [0]) <= 7000, True)
+    check("没有任何提示词超限", llm.longest <= llm.limit, True)
+    check("知识库有正文", "这是一段摘要" in out, True)
+    check("5 节齐全", _kb_complete(out), True)
 
     print()
     if FAILED:
