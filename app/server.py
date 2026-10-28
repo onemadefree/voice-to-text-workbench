@@ -171,6 +171,80 @@ def status() -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------- 作业控制
+
+def _restart_job(doc_id: str) -> bool:
+    """作业的进程已经不在了（暂停后被杀掉 / 崩了）→ 服务端重新拉起。
+
+    润色和转写都是可断点续跑的：已润色的段会跳过、已识别的块会复用。
+    """
+    from .status import read_all
+
+    jobs = [j for j in read_all() if j.get("doc_id") == doc_id]
+    if not jobs:
+        return False
+    job = jobs[0]
+    kind = job.get("kind")
+    meta = job.get("meta") or {}
+
+    if kind == "polish":
+        def runner():
+            pipeline.run_polish(doc_id, level=str(meta.get("level") or "standard"),
+                                force_polish=False, backend=meta.get("backend") or None)
+        threading.Thread(target=runner, name=f"polish-{doc_id}", daemon=True).start()
+        return True
+
+    if kind == "kb":
+        def runner():
+            pipeline.run_knowledge_base(doc_id, backend=meta.get("backend") or None)
+        threading.Thread(target=runner, name=f"kb-{doc_id}", daemon=True).start()
+        return True
+
+    if kind == "asr":
+        source = _resolve_source(doc_id)
+        if source is None:
+            return False
+        pipeline.start_transcribe(doc_id, source, engine=str(meta.get("engine") or "qwen3"))
+        return True
+
+    return False
+
+
+@app.post("/api/jobs/{doc_id}/control")
+def control_job(doc_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """暂停 / 恢复 / 取消正在运行的作业。
+
+    控制信号走文件（output/_ctl/<文档名>.cmd），任务进程在批次边界读它——
+    任务可能跑在服务端，也可能跑在命令行脚本的另一个进程里，文件是两边
+    都认得的方式：
+      pause  → 挂起等待，进程不死、进度不丢
+      cancel → 停下并退出
+      resume → 清掉信号，挂起的任务自己醒过来接着跑；进程已经不在了，
+                就由服务端重新拉起（润色 / 转写都能断点续跑）
+    """
+    from .status import clear_control, job_running, set_control
+
+    _safe_doc_id(doc_id)
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in ("pause", "resume", "cancel"):
+        raise HTTPException(status_code=400, detail="action 只能是 pause / resume / cancel")
+
+    if action == "resume":
+        clear_control(doc_id)
+        if job_running(doc_id):
+            return {"ok": True, "action": action, "restarted": False,
+                    "message": "已恢复，任务继续执行"}
+        restarted = _restart_job(doc_id)
+        return {"ok": True, "action": action, "restarted": restarted,
+                "message": ("已恢复并重新启动任务" if restarted
+                            else "已恢复（没有找到可重启的作业）")}
+
+    set_control(doc_id, action)
+    msg = {"pause": "已请求暂停，任务会在当前批次结束后挂起",
+           "cancel": "已请求取消，任务会在当前批次结束后停止"}[action]
+    return {"ok": True, "action": action, "message": msg}
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     return {

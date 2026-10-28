@@ -67,6 +67,8 @@
 .job.state-done { border-left-color: var(--ok); }
 .job.state-error, .job.state-died { border-left-color: var(--err); }
 .job.state-stale { border-left-color: var(--warn); }
+.job.state-paused { border-left-color: var(--warn); }
+.job.state-paused .job-bar > i { background: var(--warn); }
 
 .job-top {
   display: flex;
@@ -113,6 +115,68 @@
   color: var(--fg-dim);
 }
 .job-meta b { color: var(--fg); font-weight: 600; }
+
+/* ---------- 模型徽标 ---------- */
+.job-model {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .07);
+  color: var(--fg);
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.done-row .model, .proc-table .model {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 暂停 / 恢复 / 取消 ---------- */
+.job-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.job-btn {
+  font-size: 12px;
+  padding: 4px 14px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  background: rgba(255, 255, 255, .06);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.job-btn:hover:not(:disabled) { background: rgba(255, 255, 255, .12); }
+.job-btn:disabled { opacity: .45; cursor: default; }
+.job-btn.primary {
+  border-color: rgba(62, 207, 142, .5);
+  background: rgba(62, 207, 142, .16);
+  color: var(--ok);
+}
+.job-btn.danger {
+  border-color: rgba(239, 83, 80, .45);
+  background: rgba(239, 83, 80, .12);
+  color: var(--err);
+}
+.job-btn.danger:hover:not(:disabled) { background: rgba(239, 83, 80, .22); }
+
+.job-msg {
+  margin: 0 0 10px;
+  padding: 7px 11px;
+  border-radius: 7px;
+  font-size: 12px;
+  background: rgba(62, 207, 142, .12);
+  color: var(--ok);
+}
+.job-msg.bad {
+  background: rgba(239, 83, 80, .12);
+  color: var(--err);
+}
 
 /* ---------- 完成列表 ---------- */
 .done-list { display: flex; flex-direction: column; gap: 6px; }

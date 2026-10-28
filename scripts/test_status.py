@@ -100,9 +100,14 @@ def run() -> int:
     check("publish 不抛异常", ok)
 
     print("· 清理")
-    for d in (doc, weird, "__状态自测残留__"):
+    names = (doc, weird, "__状态自测残留__")
+    for d in names:
         st._path(d).unlink(missing_ok=True)
-    left = [p.name for p in st.STATUS_DIR.glob("*.json")] if st.STATUS_DIR.exists() else []
+        st._ctl_path(d).unlink(missing_ok=True)
+    # 只查自己造的残留：目录里还有真实作业的状态文件，不能要求全空
+    mine = {st._slug(d) + ".json" for d in names}
+    left = [p.name for p in st.STATUS_DIR.glob("*.json")
+            if p.name in mine] if st.STATUS_DIR.exists() else []
     check("测试文件已全部清理", not left, f"还剩 {left}")
 
     if FAILED:

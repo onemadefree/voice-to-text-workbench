@@ -63,14 +63,72 @@ class Pipeline:
         job.stage = stage
         job.message = message
         from .status import publish
-        publish(doc_id, kind, stage, message, done, total)
+        publish(doc_id, kind, stage, message, done, total,
+                model=config.ASR_MODEL if kind == "asr" else "",
+                backend="mlx" if kind == "asr" else "")
 
     def _status(self, doc_id: str, kind: str, stage: str, message: str = "",
                 done: Optional[int] = None, total: Optional[int] = None,
-                error: str = "", finished: bool = False) -> None:
+                error: str = "", finished: bool = False,
+                model: str = "", backend: str = "",
+                meta: Optional[Dict[str, Any]] = None) -> None:
         from .status import publish
         publish(doc_id, kind, stage, message, done, total,
-                error=error, finished=finished)
+                error=error, finished=finished,
+                model=model, backend=backend, meta=meta)
+
+    # ------------------------------------------------------------ 模型标注
+    @staticmethod
+    def llm_label(backend: Optional[str] = None) -> tuple:
+        """这台作业用的是哪个模型——(后端, 模型名)，给仪表盘显示。
+
+        只读配置，不实例化客户端：local 后端一实例化就要加载几 GB 权重，
+        这里只是查个名字。
+        """
+        from .llm import load_user_config
+
+        user = load_user_config()
+        name = str(backend or user.get("backend") or config.LLM_BACKEND or "local").strip().lower()
+        if name in ("", "local", "mlx", "mlx-lm"):
+            return "本地", config.LLM_MODEL
+        preset = config.LLM_PRESETS.get(name) or {}
+        model = ""
+        if str(user.get("backend") or "").strip().lower() == name:
+            model = str(user.get("model") or "")
+        if not model:
+            model = str(preset.get("model") or "")
+        return name, (model or "—")
+
+    # ------------------------------------------------------------ 控制信号
+    def _control_gate(self, doc_id: str, kind: str) -> str:
+        """在批次边界检查仪表盘发来的暂停/取消。
+
+        返回 "cancel" 表示要停；"paused" 表示任务已被挂起（调用方应返回）。
+        pause 时进程不退出，只是停在批次边界等着——进度不丢，恢复后接着跑。
+        """
+        from .status import clear_control, get_control
+
+        action = get_control(doc_id)
+        if action == "cancel":
+            self._status(doc_id, kind, "cancelled", "已取消", finished=True)
+            return "cancel"
+        if action != "pause":
+            return ""
+        backend, model = self.llm_label()
+        self._status(doc_id, kind, "paused", "已暂停，等待恢复",
+                     model=model, backend=backend)
+        while True:
+            time.sleep(2)
+            action = get_control(doc_id)
+            if action == "cancel":
+                self._status(doc_id, kind, "cancelled", "已取消", finished=True)
+                return "cancel"
+            if not action:
+                # 恢复：控制信号被清掉，任务接着往下走
+                clear_control(doc_id)
+                self._status(doc_id, kind, "polishing" if kind == "polish" else "running",
+                             "已恢复", model=model, backend=backend)
+                return ""
 
     # ------------------------------------------------------------ 公共入口
     def start_transcribe(
@@ -244,6 +302,9 @@ class Pipeline:
         t0 = time.time()
 
         for idx, (start, end) in enumerate(chunks):
+            # 块边界检查仪表盘的暂停/取消（转写按块落盘，可断点续跑）
+            if self._control_gate(doc_id, "asr") == "cancel":
+                break
             cached = existing.get(idx)
             # 覆盖度不完整（历史数据缺失/损坏）时重新识别该块
             if cached and not _chunk_is_complete(cached, (start, end)):
@@ -401,10 +462,15 @@ class Pipeline:
         llm = self.get_llm(backend)
         from .llm import polish_segments
 
+        backend_name, model_name = self.llm_label(backend)
         self._status(doc_id, "polish", "polishing",
-                     f"{backend} 润色中" if backend else "本地 LLM 润色中",
-                     0, len(idxs))
+                     f"{backend_name} 润色中" if backend else "本地 LLM 润色中",
+                     0, len(idxs), model=model_name, backend=backend_name,
+                     meta={"backend": backend_name, "level": level})
         for g_start in range(0, len(idxs), group_size):
+            # 批次边界检查仪表盘的暂停/取消
+            if self._control_gate(doc_id, "polish") == "cancel":
+                return doc
             group = idxs[g_start:g_start + group_size]
             work = [
                 {"raw": segs[i].get("clean") or segs[i].get("raw") or "", "text": segs[i].get("raw") or ""}
@@ -437,12 +503,16 @@ class Pipeline:
             }
             self.store.save(doc)
             self._status(doc_id, "polish", "polishing",
-                         f"{backend} 润色中" if backend else "本地 LLM 润色中",
-                         doc["polish_progress"]["done"], len(idxs))
+                         f"{backend_name} 润色中" if backend else "本地 LLM 润色中",
+                         doc["polish_progress"]["done"], len(idxs),
+                         model=model_name, backend=backend_name,
+                         meta={"backend": backend_name, "level": level})
 
         doc.pop("polish_progress", None)
         self._status(doc_id, "polish", "done", "润色完成",
-                     len(idxs), len(idxs), finished=True)
+                     len(idxs), len(idxs), finished=True,
+                     model=model_name, backend=backend_name,
+                     meta={"backend": backend_name, "level": level})
         return self.store.save(doc)
 
     def run_knowledge_base(self, doc_id: str, title: str = "",
@@ -456,11 +526,16 @@ class Pipeline:
             return doc
         from .llm import build_knowledge_base
 
-        self._status(doc_id, "kb", "knowledge_base", "提炼知识库中")
+        backend_name, model_name = self.llm_label(backend)
+        self._status(doc_id, "kb", "knowledge_base", "提炼知识库中",
+                     model=model_name, backend=backend_name,
+                     meta={"backend": backend_name})
         kb = build_knowledge_base(self.get_llm(backend), text,
                                   title=title or doc.get("source", ""))
         doc["knowledge_base"] = kb
-        self._status(doc_id, "kb", "done", "知识库完成", finished=True)
+        self._status(doc_id, "kb", "done", "知识库完成", finished=True,
+                     model=model_name, backend=backend_name,
+                     meta={"backend": backend_name})
         return self.store.save(doc)
 
     # ------------------------------------------------------------ 预览资源

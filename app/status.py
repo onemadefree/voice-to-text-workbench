@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional
 from . import config
 
 STATUS_DIR = config.OUTPUT_DIR / "_status"
+# 控制信号目录：仪表盘写命令，任务进程在批次边界读它
+CTL_DIR = config.OUTPUT_DIR / "_ctl"
 
 # 超过这个时间没更新，就认为状态可能卡住（秒）
 STALE_SECONDS = 900
@@ -36,6 +38,51 @@ def _slug(doc_id: str) -> str:
 
 def _path(doc_id: str) -> Path:
     return STATUS_DIR / f"{_slug(doc_id)}.json"
+
+
+def _ctl_path(doc_id: str) -> Path:
+    return CTL_DIR / f"{_slug(doc_id)}.cmd"
+
+
+# ------------------------------------------------------------ 控制信号
+# 任务可能跑在服务端，也可能跑在命令行脚本里（另一个进程），
+# 所以控制信号走文件：仪表盘写，任务自己读。
+#   pause  → 任务在批次边界挂起等待（进程还活着，进度不丢）
+#   cancel → 任务在批次边界停下并退出
+#   resume → 删掉控制文件，挂起的任务自己醒过来继续
+
+def set_control(doc_id: str, action: str) -> str:
+    """写一条控制信号（pause / cancel）。返回写进去的动作。
+
+    写失败要抛出去——仪表盘点了「暂停」却什么都没发生，是比报错更糟的结果。
+    """
+    action = str(action or "").strip().lower()
+    if action not in ("pause", "cancel"):
+        raise ValueError(f"不支持的控制动作: {action}")
+    CTL_DIR.mkdir(parents=True, exist_ok=True)
+    _ctl_path(doc_id).write_text(action, encoding="utf-8")
+    return action
+
+
+def clear_control(doc_id: str) -> None:
+    """清掉控制信号 = 恢复。"""
+    try:
+        _ctl_path(doc_id).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def get_control(doc_id: str) -> str:
+    """当前的控制信号：pause / cancel / 空（表示没有）。"""
+    try:
+        return _ctl_path(doc_id).read_text(encoding="utf-8").strip().lower()
+    except Exception:
+        return ""
+
+
+def control_pending(doc_id: str) -> bool:
+    """有没有待处理的控制信号。"""
+    return bool(get_control(doc_id))
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -68,12 +115,18 @@ def publish(
     *,
     error: str = "",
     finished: bool = False,
+    model: str = "",
+    backend: str = "",
+    meta: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """发布一次作业状态。
 
     kind: asr / polish / kb / rules
     stage: queued / probing / converting / segmenting / loading_model /
            cleaning / preview / polishing / knowledge_base / done / error
+           paused / cancelled
+    model/backend: 这项作业用的是哪个模型（仪表盘要显示）
+    meta: 恢复作业需要的参数（后端、引擎等）
     """
     try:
         STATUS_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,6 +151,9 @@ def publish(
             "total": total,
             "pid": pid,
             "error": error,
+            "model": model or prev.get("model") or "",
+            "backend": backend or prev.get("backend") or "",
+            "meta": meta if meta is not None else (prev.get("meta") or {}),
             "started_at": started,
             "updated_at": now,
             "finished_at": now if finished else None,
@@ -129,11 +185,11 @@ def read_all() -> List[Dict[str, Any]]:
         except Exception:
             continue
         finished_at = data.get("finished_at")
+        if finished_at and (now - float(finished_at)) > KEEP_FINISHED_SECONDS:
+            continue
         alive = _pid_alive(data.get("pid"))
         updated_at = float(data.get("updated_at") or 0)
         stale = bool(alive and not finished_at and (now - updated_at) > STALE_SECONDS)
-        if finished_at and (now - float(finished_at)) > KEEP_FINISHED_SECONDS:
-            continue
         done = data.get("done")
         total = data.get("total")
         pct = None
@@ -141,13 +197,18 @@ def read_all() -> List[Dict[str, Any]]:
             pct = max(0, min(100, round(float(done) / float(total) * 100)))
         if finished_at:
             state = "error" if data.get("error") else "done"
+        elif data.get("stage") == "paused":
+            # 任务被暂停了：进程还活着，但停在批次边界等着
+            state = "paused"
         elif alive:
             state = "stale" if stale else "running"
         else:
             # 进程没了却没写结束 → 异常退出
             state = "died"
+        doc_id = data.get("doc_id") or data.get("id") or path.stem
         jobs.append({
             "id": data.get("id") or data.get("doc_id") or path.stem,
+            "doc_id": doc_id,
             "kind": data.get("kind") or "unknown",
             "stage": data.get("stage") or "unknown",
             "message": data.get("message") or "",
@@ -155,19 +216,23 @@ def read_all() -> List[Dict[str, Any]]:
             "total": total,
             "pct": pct,
             "eta_s": _eta(float(data.get("started_at") or now), done, total, now)
-            if state == "running" else None,
+            if state in ("running", "paused") else None,
             "pid": data.get("pid"),
             "alive": alive,
             "stale": stale,
             "state": state,
             "error": data.get("error") or "",
+            "model": data.get("model") or "",
+            "backend": data.get("backend") or "",
+            "meta": data.get("meta") or {},
+            "control": get_control(doc_id),
             "started_at": data.get("started_at"),
             "updated_at": updated_at,
             "finished_at": finished_at,
             "elapsed_s": int(now - float(data.get("started_at") or now)),
         })
     # 正在跑的排前面，其次按开始时间倒序
-    order = {"running": 0, "stale": 1, "died": 2, "error": 3, "done": 4}
+    order = {"running": 0, "paused": 1, "stale": 2, "died": 3, "error": 4, "done": 5}
     jobs.sort(key=lambda j: (order.get(j["state"], 9), -(j.get("started_at") or 0)))
     return jobs
 

@@ -15,6 +15,8 @@
     knowledge_base: '提炼知识库',
     done: '完成',
     error: '出错',
+    paused: '已暂停',
+    cancelled: '已取消',
   };
   var KIND_LABEL = {
     asr: '转写',
@@ -25,6 +27,7 @@
   };
   var STATE_LABEL = {
     running: '运行中',
+    paused: '已暂停',
     stale: '可能卡住',
     died: '进程已退出',
     done: '完成',
@@ -63,6 +66,7 @@
     var kind = KIND_LABEL[j.kind] || j.kind;
     var stage = STAGE_LABEL[j.stage] || j.stage;
     var pct = j.pct === null || j.pct === undefined ? null : j.pct;
+    var docId = j.doc_id || j.id || '';
     var meta = [];
     if (j.done !== null && j.total) {
       meta.push('<span>进度 <b>' + j.done + ' / ' + j.total + '</b></span>');
@@ -78,18 +82,42 @@
     }
     if (j.message) meta.push('<span>' + esc(j.message) + '</span>');
     if (j.error) meta.push('<span style="color:var(--err)">' + esc(j.error) + '</span>');
+
+    // 这项作业用的是哪个模型
+    var modelTag = '';
+    if (j.model) {
+      modelTag = '<span class="job-model" title="后端：' + esc(j.backend || '—') + '">'
+        + '模型 ' + esc(j.model) + '</span>';
+    }
+
+    // 暂停 / 恢复 / 取消
+    var actions = '';
+    if (j.state === 'paused') {
+      actions = '<button class="job-btn primary" data-job="' + esc(docId) +
+        '" data-action="resume">恢复</button>' +
+        '<button class="job-btn danger" data-job="' + esc(docId) +
+        '" data-action="cancel">取消</button>';
+    } else if (j.state === 'running' || j.state === 'stale') {
+      actions = '<button class="job-btn" data-job="' + esc(docId) +
+        '" data-action="pause">暂停</button>' +
+        '<button class="job-btn danger" data-job="' + esc(docId) +
+        '" data-action="cancel">取消</button>';
+    }
+
     return '<div class="job kind-' + esc(j.kind) + ' state-' + esc(j.state) + '">' +
       '<div class="job-top">' +
         '<span class="job-kind">' + esc(kind) + '</span>' +
         '<span class="job-title">' + esc(j.id) + '</span>' +
+        modelTag +
         '<span class="job-stage">' + esc(stage) +
-          (j.state !== 'running' && j.state !== 'stale' && STATE_LABEL[j.state]
-            ? ' · ' + STATE_LABEL[j.state] : '') +
+          (j.state !== 'running' && j.state !== 'stale' && j.state !== 'paused'
+            && STATE_LABEL[j.state] ? ' · ' + STATE_LABEL[j.state] : '') +
         '</span>' +
         '<span class="job-pct">' + (pct === null ? '' : pct + '%') + '</span>' +
       '</div>' +
       bar(pct) +
       '<div class="job-meta">' + meta.join('') + '</div>' +
+      (actions ? '<div class="job-actions">' + actions + '</div>' : '') +
     '</div>';
   }
 
@@ -132,7 +160,8 @@
   function renderJobs(jobs) {
     var running = [], done = [];
     (jobs || []).forEach(function (j) {
-      if (j.state === 'running' || j.state === 'stale' || j.state === 'died') running.push(j);
+      if (j.state === 'running' || j.state === 'stale' || j.state === 'died'
+          || j.state === 'paused') running.push(j);
       else done.push(j);
     });
     $('jobList').innerHTML = running.length
@@ -151,6 +180,7 @@
         '<span class="who">' + esc(j.id) + '</span>' +
         '<span>' + esc(KIND_LABEL[j.kind] || j.kind) + '</span>' +
         '<span>' + esc(STAGE_LABEL[j.stage] || j.stage) + '</span>' +
+        '<span class="dim model">' + esc(j.model || '—') + '</span>' +
         '<span class="dim">' + dur + '</span>' +
         '<span class="dim">' + (j.finished_at
           ? new Date(j.finished_at * 1000).toLocaleString('zh-CN', { hour12: false })
@@ -166,6 +196,7 @@
         '<td>' + esc(j.pid) + '</td>' +
         '<td>' + esc(KIND_LABEL[j.kind] || j.kind) + '</td>' +
         '<td>' + esc(j.id) + '</td>' +
+        '<td class="model">' + esc(j.model || '—') + '</td>' +
         '<td>' + (j.cpu_pct === null || j.cpu_pct === undefined ? '—' : num(j.cpu_pct, 1) + '%') + '</td>' +
         '<td>' + (j.rss_mb === null || j.rss_mb === undefined ? '—' : num(j.rss_mb, 1) + ' MB') + '</td>' +
         '<td class="' + (j.state === 'running' ? '' : 'dim') + '">'
@@ -177,6 +208,7 @@
       '<td>' + esc(srv.pid) + '</td>' +
       '<td>服务</td>' +
       '<td class="dim">' + esc(srv.build || '') + '</td>' +
+      '<td class="dim">—</td>' +
       '<td>—</td><td>—</td>' +
       '<td class="dim">运行中</td>' +
     '</tr>');
@@ -193,6 +225,42 @@
   }
 
   var timer = null;
+
+  function setJobMsg(text, bad) {
+    var el = $('jobMsg');
+    if (!el) return;
+    if (!text) { el.hidden = true; el.textContent = ''; return; }
+    el.hidden = false;
+    el.textContent = text;
+    el.className = 'job-msg' + (bad ? ' bad' : '');
+  }
+
+  function onJobAction(e) {
+    var btn = (e.target && e.target.closest) ? e.target.closest('.job-btn') : null;
+    if (!btn) return;
+    var docId = btn.getAttribute('data-job') || '';
+    var action = btn.getAttribute('data-action') || '';
+    if (!docId || !action) return;
+    var label = { pause: '暂停', resume: '恢复', cancel: '取消' }[action] || action;
+    if (action === 'cancel'
+        && !window.confirm('确定取消「' + docId + '」吗？当前批次结束后停止。')) return;
+    btn.disabled = true;
+    setJobMsg('正在' + label + '「' + docId + '」…');
+    fetch('/api/jobs/' + encodeURIComponent(docId) + '/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: action }),
+    }).then(function (r) { return r.json(); })
+      .then(function (d) {
+        setJobMsg((d && d.message) ? d.message : ('已' + label));
+        btn.disabled = false;
+        tick();
+      })
+      .catch(function (err) {
+        setJobMsg('操作失败：' + err.message, true);
+        btn.disabled = false;
+      });
+  }
 
   function tick() {
     fetch('/api/status')
@@ -211,6 +279,7 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     $('btnRefresh').addEventListener('click', tick);
+    $('jobList').addEventListener('click', onJobAction);
     start();
   });
 })();

@@ -27,6 +27,7 @@
   <main class="dash-grid">
     <section class="dash-card dash-jobs">
       <h2>正在运行</h2>
+      <p id="jobMsg" class="job-msg" hidden></p>
       <div id="jobList" class="job-list"></div>
       <h2 class="sec">最近完成</h2>
       <div id="doneList" class="done-list"></div>
@@ -44,7 +45,7 @@
     <section class="dash-card dash-wide">
       <h2>相关进程</h2>
       <table class="proc-table">
-        <thead><tr><th>PID</th><th>类型</th><th>文档</th><th>CPU</th><th>内存</th><th>状态</th></tr></thead>
+        <thead><tr><th>PID</th><th>类型</th><th>文档</th><th>模型</th><th>CPU</th><th>内存</th><th>状态</th></tr></thead>
         <tbody id="procBody"></tbody>
       </table>
     </section>
