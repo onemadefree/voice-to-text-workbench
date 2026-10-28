@@ -530,8 +530,10 @@ class Pipeline:
         self._status(doc_id, "kb", "knowledge_base", "提炼知识库中",
                      model=model_name, backend=backend_name,
                      meta={"backend": backend_name})
-        # 标题用文件名去掉后缀：不然知识库的标题会带「.mp3」
-        title = title or Path(doc.get("source") or "").stem or doc_id
+        # 标题用文件名去掉后缀：不然知识库的标题会带「.mp3」。
+        # 调用方（重建脚本）可能直接传带后缀的 source，所以传入的 title 也要去。
+        title = _strip_media_suffix(title) or _strip_media_suffix(
+            doc.get("source") or "") or doc_id
         kb = build_knowledge_base(self.get_llm(backend), text, title=title)
         if not kb.strip():
             # 提炼失败（模型吐了思考过程 / 被截断）：别写空壳，
@@ -562,6 +564,22 @@ class Pipeline:
 
 
 # ---------------------------------------------------------------- 工具函数
+
+_MEDIA_SUFFIXES = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".mp4",
+                   ".wma", ".amr", ".opus", ".aiff")
+
+
+def _strip_media_suffix(title: str) -> str:
+    """去掉标题末尾的音频后缀（.mp3 之类）。
+
+    知识库标题直接来自源文件名，带着「.mp3」进正文很难看。调用方
+    （重建脚本）也可能传带后缀的 source，所以两条路都要过这一道。
+    """
+    name = (title or "").strip().rstrip(".").strip()
+    if name.lower().endswith(_MEDIA_SUFFIXES):
+        name = os.path.splitext(name)[0].strip()
+    return name
+
 
 def _dedupe_segments(segments: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """去掉「时间完全相同且文本相同」的重复段落（并发/重跑可能产生）。"""

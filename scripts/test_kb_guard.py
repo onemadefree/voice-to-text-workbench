@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.llm import _kb_complete, build_knowledge_base  # noqa: E402
+from app.pipeline import _strip_media_suffix  # noqa: E402
 
 FULL_KB = """# 标题
 ## 摘要
@@ -91,6 +92,17 @@ class ContextLLM:
 
 
 def main() -> int:
+    print("· 标题去音频后缀")
+    check("去 .mp3", _strip_media_suffix("组织变革管理与变革领导力-程建刚.mp3"),
+          "组织变革管理与变革领导力-程建刚")
+    check("去 .wav", _strip_media_suffix("演讲.wav"), "演讲")
+    check("去 .M4A", _strip_media_suffix("访谈.M4A"), "访谈")
+    check("本来就干净的标题不动", _strip_media_suffix("沟通技巧与人际关系-李爱华"),
+          "沟通技巧与人际关系-李爱华")
+    check("结尾的点也去掉", _strip_media_suffix("程建刚."), "程建刚")
+    check("空标题不炸", _strip_media_suffix(""), "")
+    check("不是后缀的不动", _strip_media_suffix("第二部分.第二章"), "第二部分.第二章")
+
     print("· _kb_complete 判定")
     check("完整的算完整", _kb_complete(FULL_KB), True)
     check("截断的不算完整", _kb_complete(TRUNCATED_KB), False)
