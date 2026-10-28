@@ -102,18 +102,28 @@ class EngineSpec:
 
 ### 2.2 加速后端探测与自动降级（新增 `app/device.py`）
 
-启动时探测当前机器能用什么，按优先级挑：
+**原则：不要「查询」，要「试跑」。** 任何 `is_available()` 都不等于「能用」——
+cuDNN 缺失、显存不足、算子不支持，都会让查询通过但推理炸。
+正确做法是**用 3 秒样本真跑一遍**，拿到非空文本才算这一档可用。
 
 | 平台 | 优先级 | 探测手段 |
 |---|---|---|
-| macOS | mlx | `import mlx.core` 成功 |
-| Linux/Windows + NVIDIA | cuda | `nvidia-smi` 存在，或 `torch.cuda.is_available()` |
-| Windows + AMD/Intel | directml → vulkan → cpu | `onnxruntime` 的 DmlExecutionProvider 可用性 |
-| Linux + AMD | rocm（仅 torch 系）→ vulkan → cpu | `rocm-smi` / `torch.version.hip` |
-| 兜底 | cpu | 总是可用 |
+| macOS | mlx | `import mlx.core` 成功 + 试跑 |
+| Linux/Windows + NVIDIA | mlx-cuda → vLLM → sherpa-onnx CUDA | 逐档**试跑**，失败即降级 |
+| Windows + AMD/Intel | FunASR Vulkan → whisper.cpp Vulkan → CPU | 逐档试跑 |
+| Linux + AMD | FunASR Vulkan → PyTorch ROCm → whisper.cpp HIP → CPU | 逐档试跑 |
+| 兜底 | CPU | 总是可用 |
+
+⚠️ **DirectML 不进降级链**：它拿不到词级时间戳（通用 whisper→ONNX 导出不含 cross-attention），
+本项目「词级时间戳」是硬约束。只有用户**显式关闭时间戳**时才允许把
+`sherpa-onnx + DirectML` 作为候选，并在界面上标注质量降级。
+
+⚠️ **Linux + N 卡第一档首选 vLLM 而不是 CT2**：CT2 在 NVIDIA 上只支持 CUDA 12 + cuDNN 9
+（版本锁死），而 vLLM / MLX CUDA 直接跑 Qwen3-ASR 原生权重，能保住模型与对齐器。
 
 **降级要可见**：实际用的后端写进作业状态（`output/_status/*.json` 的 `meta`），
 仪表盘上标出来。不能出现「装了个 CUDA 版但其实跑在 CPU 上，用户不知道」。
+失败时**降级并给中文提示**，不弹 Python 栈给最终用户。
 
 ### 2.3 时间戳契约
 
@@ -129,20 +139,48 @@ class EngineSpec:
 
 **决策：优先选自带时间戳的引擎；把「无对齐器」标记为质量降级而不是静默兜底。**
 
+把候选引擎逐个对上（数据来自《跨平台 ASR 方案》）：
+
+| 候选引擎 | 词级时间戳来源 | 质量 |
+|---|---|---|
+| MLX Qwen3-ASR + Qwen3-ForcedAligner（现状） | 独立强制对齐器 | ✅ 最优（AAS 中文 33.1ms） |
+| vLLM 原生 Qwen3-ASR | 官方 `qwen3_asr_forced_aligner.py` | ✅ 同等 |
+| transformers Qwen3-ASR | `AutoModelForTokenClassification` | ✅ 同等 |
+| sherpa-onnx + Qwen3-ASR int8 | ❌ `timestamps` 为空 | ⚠️ 只能按字数估时 |
+| sherpa-onnx + Paraformer-zh int8 | ✅ 模型自带 timestamps | ✅ 可交付 |
+| FunASR SenseVoice | ❌ `timestamps` 为空（靠 VAD 给句级） | ⚠️ |
+| faster-whisper | ✅ `word_timestamps=True` | ✅ 但**无热词 API** |
+| whisper.cpp | ⚠️ `-ml 1`（官方标 experimental） | ⚠️ |
+
 ### 2.4 依赖拆分
 
 现在是 `setup.sh` 里一行写死，且**没有 `requirements.txt`**。改为 `pyproject.toml` + extras：
 
-```
+```toml
+[project]
+requires-python = ">=3.11"
+dependencies = ["fastapi", "uvicorn", "numpy", "python-multipart"]
+
 [project.optional-dependencies]
-macos   = ["mlx-audio", "mlx-lm"]
-cuda    = ["faster-whisper"]        # 另需系统装 cuBLAS/cuDNN
-cpu     = ["faster-whisper"]
-directml= ["onnxruntime-directml", "sherpa-onnx"]
-rocm    = ["funasr", "onnxruntime-gpu"]
+macos        = ["mlx==0.32.4", "mlx-metal==0.32.4", "mlx-audio==0.6.3", "mlx-lm"]
+linux-cuda   = ["mlx==0.32.4", "mlx-cuda-12==0.32.4", "mlx-audio==0.6.3"]
+win-cuda     = ["mlx==0.32.4", "mlx-cuda-12==0.32.4", "mlx-audio==0.6.3"]  # 显式，不写 extra
+win-cpu      = ["mlx==0.32.4", "mlx-cpu==0.32.4", "mlx-audio==0.6.3"]
+cpu-onnx     = ["sherpa-onnx==2.0.1", "onnxruntime==1.31.1"]
+cpu-gpu-onnx = ["sherpa-onnx==2.0.1", "onnxruntime-gpu==1.31.1"]
+edge         = ["funasr==1.4.17"]
+whisper      = ["faster-whisper==1.2.1"]
 ```
 
 `setup.sh` 保留给 macOS/Linux，另加 `setup.ps1` 给 Windows。
+
+⚠️ **两个必须写进 README 的坑**：
+
+1. **Windows 上不能用 extra**：MLX 的 extras 全部带 `platform_system == "Linux"` 标记，
+   `pip install mlx[cuda]` 在 Windows 上**不会**装上后端包，只会装到 0.6MB 的空壳 core。
+   必须显式写 `mlx==0.32.4` + `mlx-cuda-12==0.32.4`。
+2. **MLX 的 CUDA 后端要求 glibc ≥ 2.35**（= Ubuntu 22.04+）；
+   CentOS 7 / RHEL 8（glibc 2.28）**装不了 MLX 的任何后端**，这类机器只能走 vLLM / ONNX。
 
 ### 2.5 模型获取 `scripts/fetch_models.py`
 
@@ -151,9 +189,11 @@ rocm    = ["funasr", "onnxruntime-gpu"]
 | 引擎 | 模型来源 | 格式 |
 |---|---|---|
 | qwen3 / whisper（mlx） | HF/ModelScope `mlx-community/*` | MLX 量化 safetensors |
+| qwen3（vLLM / transformers） | HF `Qwen/Qwen3-ASR-0.6B-hf` / `-1.7B-hf` | bf16 safetensors（官方权重） |
 | faster-whisper | HF `Systran/faster-whisper-*` | CTranslate2 |
 | funasr | ModelScope `iic/*` | torch / onnx |
-| sherpa-onnx | GitHub release / HF | onnx |
+| funasr 离线二进制 | FunASR 官方 release（`windows-x64-{cuda,vulkan,avx2}.zip` / linux 同款） | GGUF（sensevoice + fsmn-vad） |
+| sherpa-onnx | 官方 release / HF | onnx（Qwen3-ASR-0.6B int8 / Paraformer-zh / SenseVoice） |
 
 **离线安装**也要支持：企业内网环境不能现下几个 GB 的模型，
 需要 `fetch_models.py --offline <本地目录>` 或直接拷 `models/` 目录过去。
@@ -166,13 +206,18 @@ rocm    = ["funasr", "onnxruntime-gpu"]
 |---|---|---|---|
 | 0 | 调研 + 设计（本分支） | 本篇 + 《跨平台 ASR 方案》 | 低 |
 | 1 | 抽象层重构 | `asr_registry.py` + `device.py`；**现有 mlx 行为零变化** | 低 |
-| 2 | 接入 portable 引擎（覆盖面最大的一条） | 新增引擎 + extras + 模型源 | 中 |
-| 3 | 补中文精度 & AMD 路线 | 视选型结果 | 中 |
-| 4 | Windows 打包 + 离线安装 | `setup.ps1` / 打包方案 / ffmpeg 内置 | 中高 |
+| 2 | **保住模型换运行时**：Linux/N 卡跑 MLX CUDA 或 vLLM 原生 Qwen3-ASR | 新增 `qwen3-cuda` / `qwen3-vllm` 引擎 + `linux-cuda` extras | 中（算子覆盖未实测） |
+| 3 | **兜底与 A 卡**：sherpa-onnx（CPU/CUDA）+ FunASR Vulkan | ONNX 引擎 + `cpu-onnx` extras + Vulkan 分发 | 中（A 卡时间戳降级） |
+| 4 | Windows 打包 + 离线安装 | `setup.ps1` / onedir 打包 / ffmpeg 内置 / 模型外置 | 中高（杀软、MAX_PATH、GBK） |
 | 5 | 回归验证 | 同一批音频的多引擎 CER 对比表 | — |
 
 **阶段 1 的验收标准很硬**：`v1.0.0` 的 11 篇产物必须**一字节不变**，
 `verify_all` 仍 11/11，macOS 上的行为与现在完全一致。
+
+**阶段顺序的依据**（来自《跨平台 ASR 方案》）：先做阶段 2 而不是阶段 3，
+因为「保住模型换运行时」一旦验证通过，Windows N 卡与 Linux N 卡可以**复用同一套模型与同一份代码**，
+投入产出比最高；而 sherpa-onnx 虽然覆盖面最大，但要**放弃 Qwen3-ASR**（`timestamps` 为空），
+代价是词级时间戳降级，属于不得已的下一步。
 
 ---
 
@@ -188,9 +233,26 @@ rocm    = ["funasr", "onnxruntime-gpu"]
 
 ## 五、待研究确认的点
 
-以下问题的答案会直接决定阶段 2~4 的取舍，已在《跨平台 ASR 方案》中逐条核实：
+调研阶段已回答的问题（详见《跨平台 ASR 方案》）：
 
-- Qwen3-ASR 本身能不能脱离 MLX 跑（transformers / vLLM / ONNX）——**能保住模型就不用换模型**；
-- A 卡上到底哪条路是死路（faster-whisper 有无 ROCm？DirectML 够不够用？）；
-- CPU 兜底路线的 RTF 量级与最低配要求；
-- Windows 上 ffmpeg 与 cuDNN 的分发方式。
+- Qwen3-ASR 能不能脱离 MLX 跑 —— **能**。vLLM 0.32.0 原生含 `qwen3_asr.py` +
+  `qwen3_asr_forced_aligner.py`（官方 day-0 支持）；transformers ≥5.13.0 有官方 `-hf` 权重；
+  sherpa-onnx 提供 Qwen3-ASR-0.6B int8 ONNX。
+- A 卡上哪条路是死路 —— **faster-whisper/CT2 的 GPU 只支持 NVIDIA**（CT2 官方硬件页白名单），
+  WhisperX 连带死；**DirectML 拿不到词级时间戳**，不满足本项目硬约束。
+  A 卡可用的是 **FunASR 官方 Vulkan 运行时**（Windows/Linux 都有官方 zip）与 whisper.cpp HIP。
+- CPU 兜底的 RTF 量级 —— sherpa-onnx + Qwen3-ASR-0.6B int8 **RTF 0.077~0.103**；
+  Paraformer-zh **RTF 0.073** 且**自带 timestamps + 原生热词**（本项目热词刚需）。
+- Windows 上 ffmpeg 与 cuDNN 的分发方式 —— ffmpeg **随包分发**；
+  cuDNN **pip 装不上（Linux 限定）**，需下载官方 DLL 并加进 `PATH`。
+
+仍需**实测**才能拍板的问题：
+
+| 问题 | 为什么阻塞 | 怎么验 |
+|---|---|---|
+| mlx-audio 的 Qwen3-ASR 在 Linux/Windows CUDA 下能否跑通 | 决定阶段 2 走 MLX CUDA 还是 vLLM | 一台 N 卡机器转 5 分钟中文，与 Apple 路径逐字对比 |
+| Qwen3-ASR 在 CUDA 上的单流 RTF | 决定是否需要 batch | 记录 1 小时音频 wall-clock |
+| sherpa-onnx 的 Windows CUDA wheel 是否自带 cuDNN DLL | 决定 Windows N 卡能否免装 | 目标机 `import sherpa_onnx` + 跑一次 GPU 推理 |
+| SenseVoice vs Whisper 的具体 CER | 决定 A 卡/CPU 兜底能不能上生产 | 用 `source/` 里的真实录音做 A/B |
+| A 卡上 Vulkan 的识别质量 | 已知负面案例 issue #2400 | 真实录音抽检输出 |
+| AMX 在 ASR 场景的实际加速倍数 | 决定 Intel CPU 档是否值得投入 | Sapphire Rapids + OpenVINO vs fp32 对拍 |
