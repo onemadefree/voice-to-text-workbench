@@ -51,8 +51,10 @@ class FakeLLM:
         self.fail_times = fail_summary_times
         self.summary_calls = 0
         self.max_tokens_seen: list[int] = []
+        self.no_think_seen: list[bool] = []
 
-    def complete(self, prompt, system, max_tokens=2048, temperature=0.3):
+    def complete(self, prompt, system, max_tokens=2048, temperature=0.3, no_think=False):
+        self.no_think_seen.append(no_think)
         if "知识库" in system:
             self.summary_calls += 1
             self.max_tokens_seen.append(max_tokens)
@@ -76,7 +78,7 @@ class ContextLLM:
         self.longest = 0
         self.merge_prompts: list[int] = []
 
-    def complete(self, prompt, system, max_tokens=2048, temperature=0.3):
+    def complete(self, prompt, system, max_tokens=2048, temperature=0.3, no_think=False):
         self.longest = max(self.longest, len(prompt))
         if len(prompt) > self.limit:
             raise RuntimeError("context_length_exceeded")
@@ -124,6 +126,7 @@ def main() -> int:
     llm = FakeLLM(FULL_KB)
     build_knowledge_base(llm, "演讲正文。" * 500, title="测试")
     check("汇总 max_tokens >= 8192", llm.max_tokens_seen[0] >= 8192, True)
+    check("知识库链路关掉了模型思考", all(llm.no_think_seen), True)
 
     print("· 上下文上限：要点合并要切片，不能自己就超限")
     llm = ContextLLM()

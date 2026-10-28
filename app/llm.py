@@ -415,8 +415,9 @@ def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
         headers["Authorization"] = f"Bearer {api_key}"
     retries = max(1, config.LLM_API_RETRIES)
 
-    def generate(prompt: str, system: str, max_tokens: int = 2048, temperature: float = 0.3) -> str:
-        body = json.dumps({
+    def generate(prompt: str, system: str, max_tokens: int = 2048, temperature: float = 0.3,
+                 no_think: bool = False) -> str:
+        payload = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system},
@@ -424,9 +425,19 @@ def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
             ],
             "temperature": temperature,
             "max_tokens": max_tokens,
-        }, ensure_ascii=False).encode("utf-8")
+        }
+        # 有些服务（vLLM 部署的 Qwen3）默认开着深度思考：思考 token 会把
+        # max_tokens 吃光、正文一个字都不剩（实测 17784 token 全花在思考上，
+        # 结果「知识库」输出成了半截思考过程）。no_think 时试着关掉；
+        # 服务不认这个参数就退回不带参数的请求。
+        variants = []
+        if no_think:
+            variants.append(dict(payload, chat_template_kwargs={"enable_thinking": False}))
+        variants.append(payload)
+        vi = 0
         last = ""
         for attempt in range(1, retries + 1):
+            body = json.dumps(variants[vi], ensure_ascii=False).encode("utf-8")
             try:
                 req = urllib.request.Request(url, data=body, headers=headers, method="POST")
                 with urllib.request.urlopen(req, timeout=config.LLM_API_TIMEOUT) as resp:
@@ -474,6 +485,11 @@ def _openai_client(base: str, api_key: str = "", model: str = "local-model"):
                     # 内容审核拦截：重试多少次都一样，直接放弃这一段
                     log.warning("内容审核拦截，跳过本段: %s", detail[:160])
                     raise ContentBlocked(detail[:160]) from exc
+                if exc.code == 400 and vi < len(variants) - 1:
+                    # 服务不认「关闭思考」这个参数，去掉再试
+                    vi += 1
+                    log.info("服务不接受关闭思考的参数，改用默认请求")
+                    continue
                 if exc.code in (422, 429, 503):
                     # 限流：多等一会儿再试，别把退避压到几秒钟
                     time.sleep(min(20 * attempt, 60))
@@ -553,8 +569,13 @@ class LocalLLM:
                 if self._generate is None:
                     self._generate, self._info = _build_client(self._backend)
 
-    def complete(self, prompt: str, system: str, max_tokens: int = 2048, temperature: float = 0.3) -> str:
+    def complete(self, prompt: str, system: str, max_tokens: int = 2048,
+                 temperature: float = 0.3, no_think: bool = False) -> str:
         self._ensure()
+        import inspect
+        if "no_think" in inspect.signature(self._generate).parameters:
+            return self._generate(prompt, system, max_tokens=max_tokens,
+                                  temperature=temperature, no_think=no_think)
         return self._generate(prompt, system, max_tokens=max_tokens, temperature=temperature)
 
 
@@ -1108,6 +1129,7 @@ def _extract_part(llm: LocalLLM, part: str, label: str, budget: int) -> str:
             CHUNK_SYSTEM,
             max_tokens=1400 + budget,
             temperature=0.2,
+            no_think=True,
         )
     except ContentBlocked:
         # 整段触发审核：切成两半各试一次，能救一半算一半
@@ -1122,6 +1144,7 @@ def _extract_part(llm: LocalLLM, part: str, label: str, budget: int) -> str:
                     CHUNK_SYSTEM,
                     max_tokens=1400 + budget,
                     temperature=0.2,
+                    no_think=True,
                 )
             except ContentBlocked:
                 continue
@@ -1164,6 +1187,7 @@ def _compress_notes(llm: LocalLLM, merged: str, budget: int) -> str:
                 CHUNK_SYSTEM,
                 max_tokens=2600 + budget,
                 temperature=0.2,
+                no_think=True,
             )
             return out.strip() if out and out.strip() else chunk
         except Exception as exc:
@@ -1241,7 +1265,8 @@ def build_knowledge_base(llm: LocalLLM, full_text: str, title: str = "") -> str:
         )
         try:
             out = llm.complete(prompt, KB_SYSTEM,
-                               max_tokens=max(8192, budget), temperature=0.2)
+                               max_tokens=max(8192, budget), temperature=0.2,
+                               no_think=True)
         except Exception as exc:
             log.warning("知识库生成失败: %s", exc)
             out = ""
