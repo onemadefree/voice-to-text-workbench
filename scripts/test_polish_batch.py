@@ -118,7 +118,27 @@ def run() -> int:
     if any(not o.strip() for o in out):
         failed.append(("全失败时不能留空", "非空", out))
 
-    print(f"用例 5 项")
+    # 5) 熔断：整批一直失败时不能无限拆半（16→8→4→2→1 每级两次提示词
+    #    ×三次重试，服务一挂就是十几个小时出不来）。要有次数与深度上限，
+    #    超了就整批退回原文、让流程往前走。
+    class DeadLLM(FakeLLM):
+        def complete(self, prompt, system, max_tokens=2048, temperature=0.3) -> str:
+            import re
+            pairs = re.findall(r"^(\d+)\. (.+)$", prompt, re.M)
+            self.calls.append(len(pairs))
+            return ""
+
+    llm4 = DeadLLM()
+    out = polish_segments(llm4, segs(96))
+    if any(not o.strip() for o in out):
+        failed.append(("熔断后不能留空", "非空", [o for o in out if not o.strip()][:3]))
+    if len(llm4.calls) > 60:
+        failed.append(("熔断后请求数应有上限", "≤60 次",
+                       f"{len(llm4.calls)} 次"))
+    if not all(o.strip() == f"原始{i}" for i, o in enumerate(out)):
+        failed.append(("熔断后应退回原文", "原文", out[:3]))
+
+    print(f"用例 6 项")
     if failed:
         for name, want, got in failed:
             print(f"  ✗ {name}\n      期望 {want}\n      实际 {got}")

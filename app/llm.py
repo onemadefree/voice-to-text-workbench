@@ -540,6 +540,11 @@ class LocalLLM:
 
 _NUM_RE = re.compile(r"^(\d{1,3})\.\s*(.*)$", re.S)
 
+# 整批润色失败时的拆半上限：连续这么多次整批没结果就放弃本组，
+# 拆半的深度上限。这两个值是防止「服务一挂就指数级放大请求量」的保护。
+MAX_EMPTY_BATCHES = 4
+MAX_SPLIT_DEPTH = 2
+
 
 def polish_segments(
     llm: LocalLLM,
@@ -551,16 +556,31 @@ def polish_segments(
 ) -> List[str]:
     """对原始文本批量润色，返回与 segments 等长的改写文本列表。
 
-    两道保险：
+    三道保险：
     1. 输出用带序号的 JSON 行，模型漏行也不会让后续条目整体错位；
-    2. 每条结果做与原文的字符相似度校验，明显不对应的退回原文。
+    2. 每条结果做与原文的字符相似度校验，明显不对应的退回原文；
+    3. 整批失败时的拆半重试有**次数与深度上限**——否则 16 条一批失败会
+       指数级放大请求量（每级 2 个提示词 × 3 次重试），服务一挂就是十几个
+       小时出不来。超过上限就整批退回原文，让流程往前走。
     """
     out: List[str] = [""] * len(segments)
     batch: List[int] = []
     buf_len = 0
+    empty_batches = 0        # 连续「整批没结果」的次数
+    aborted = False          # 熔断后本组剩下的段直接退回原文
+
+    def _fallback(i: int) -> None:
+        src = (segments[i].get("raw") or segments[i].get("text") or "").strip()
+        orig = (segments[i].get("text") or "").strip()
+        out[i] = _safe_base(src, orig)
 
     def flush(idxs: List[int], depth: int = 0) -> None:
+        nonlocal empty_batches, aborted
         if not idxs:
+            return
+        if aborted:
+            for i in idxs:
+                _fallback(i)
             return
         lines = []
         for i in idxs:
@@ -588,11 +608,21 @@ def polish_segments(
         if not mapping and len(idxs) > 1:
             # 整批都没拿到结果（模型空回复 / 被 max_tokens 截断）：
             # 拆成两半重来，小批量更容易成功，避免一批 16 段全退回原文。
+            empty_batches += 1
+            if empty_batches > MAX_EMPTY_BATCHES or depth >= MAX_SPLIT_DEPTH:
+                log.warning(
+                    "润色连续 %d 批无结果（深度 %d），本组剩余 %d 段退回原文",
+                    empty_batches, depth, len(idxs))
+                aborted = True
+                for i in idxs:
+                    _fallback(i)
+                return
             log.warning("润色批次 %d 条无结果，拆半重试", len(idxs))
             mid = len(idxs) // 2
             flush(idxs[:mid], depth + 1)
             flush(idxs[mid:], depth + 1)
             return
+        empty_batches = 0
         # 模型只写出了一部分条目：把没写到的拆小重试，别让它们白白退回规整稿。
         # 零散段落最容易触发这个——模型要为每段单独推理，思考 token 会吃满
         # 预算导致响应被截断（实测 12 条一批 reasoning_tokens 就到了 20220）。

@@ -23,9 +23,15 @@ from app.store import DocumentStore, segment_final_text  # noqa: E402
 
 
 def main() -> int:
-    doc_ids = sys.argv[1:]
+    args = sys.argv[1:]
+    force = True
+    if args and args[0] == "--resume":
+        # 续跑：已经润色过的段跳过，只处理剩下的（换后端/换代码后续跑用）
+        force = False
+        args = args[1:]
+    doc_ids = args
     if not doc_ids:
-        print("用法: _local_repolish.py <文档名> [...]")
+        print("用法: _local_repolish.py [--resume] <文档名> [...]")
         return 1
     backend = load_user_config().get("backend") or "minimax"
     model = load_user_config().get("model")
@@ -54,7 +60,7 @@ def main() -> int:
             print(f"=== {doc_id}（{len(segs)} 段）已润色过，只补知识库 ===", flush=True)
         else:
             print(f"=== {doc_id}（{len(segs)} 段）开始重刷 ===", flush=True)
-            pipeline.run_polish(doc_id, level="standard", force_polish=True, backend=backend)
+            pipeline.run_polish(doc_id, level="standard", force_polish=force, backend=backend)
         doc = store.load(doc_id) or {}
         segs = doc.get("segments") or []
         echo = sum(1 for s in segs
