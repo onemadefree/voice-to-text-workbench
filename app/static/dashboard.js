@@ -45,6 +45,17 @@
     return sec + ' 秒';
   }
 
+  // 粗粒度时长：分钟级。仪表盘每 2 秒轮询一次，如果把秒也显示出来，
+  // 每次轮询 HTML 都会变、整块重绘，按钮就被换掉——用户点按钮会落空。
+  function fmtDurCoarse(s) {
+    if (s === null || s === undefined) return '—';
+    s = Math.max(0, Math.round(s));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h) return h + ' 小时 ' + m + ' 分';
+    if (m) return m + ' 分';
+    return '不到 1 分钟';
+  }
+
   function num(v, digits) {
     if (v === null || v === undefined) return '—';
     if (typeof v !== 'number') return String(v);
@@ -71,8 +82,8 @@
     if (j.done !== null && j.total) {
       meta.push('<span>进度 <b>' + j.done + ' / ' + j.total + '</b></span>');
     }
-    if (j.elapsed_s) meta.push('<span>已跑 <b>' + fmtDur(j.elapsed_s) + '</b></span>');
-    if (j.eta_s) meta.push('<span>预计剩余 <b>' + fmtDur(j.eta_s) + '</b></span>');
+    if (j.elapsed_s) meta.push('<span>已跑 <b>' + fmtDurCoarse(j.elapsed_s) + '</b></span>');
+    if (j.eta_s) meta.push('<span>预计剩余 <b>' + fmtDurCoarse(j.eta_s) + '</b></span>');
     if (j.pid) meta.push('<span>PID <b>' + j.pid + '</b></span>');
     if (j.cpu_pct !== undefined && j.cpu_pct !== null) {
       meta.push('<span>进程 CPU <b>' + num(j.cpu_pct, 1) + '%</b></span>');
@@ -157,6 +168,14 @@
     $('sysList').innerHTML = out;
   }
 
+  // 内容没变就别重绘：整块替换 innerHTML 会把按钮换掉，
+  // 用户正好点的时候元素就没了，点击落空。
+  function setHTML(id, html) {
+    var el = $(id);
+    if (!el) return;
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+
   function renderJobs(jobs) {
     var running = [], done = [];
     (jobs || []).forEach(function (j) {
@@ -164,15 +183,15 @@
           || j.state === 'paused') running.push(j);
       else done.push(j);
     });
-    $('jobList').innerHTML = running.length
+    setHTML('jobList', running.length
       ? running.map(jobCard).join('')
-      : '<div class="empty-note">当前没有正在运行的任务</div>';
+      : '<div class="empty-note">当前没有正在运行的任务</div>');
 
     if (!done.length) {
-      $('doneList').innerHTML = '<div class="empty-note">暂无已完成记录</div>';
+      setHTML('doneList', '<div class="empty-note">暂无已完成记录</div>');
       return;
     }
-    $('doneList').innerHTML = done.slice(0, 12).map(function (j) {
+    setHTML('doneList', done.slice(0, 12).map(function (j) {
       var mark = j.state === 'error' ? '<span class="bad">✕</span>' : '<span class="ok">✓</span>';
       var dur = j.finished_at && j.started_at
         ? fmtDur(j.finished_at - j.started_at) : '—';
@@ -186,7 +205,7 @@
           ? new Date(j.finished_at * 1000).toLocaleString('zh-CN', { hour12: false })
           : '') + '</span>' +
       '</div>';
-    }).join('');
+    }).join(''));
   }
 
   function renderProcs(data) {
@@ -215,8 +234,7 @@
     $('procBody').innerHTML = rows.join('');
   }
 
-  function render(data) {
-    $('dashSub').textContent = '构建 ' + (data.server && data.server.build || '—')
+  function render(data) {    $('dashSub').textContent = '构建 ' + (data.server && data.server.build || '—')
       + '　·　输出目录 ' + (data.server && data.server.output_dir || '');
     renderJobs(data.jobs);
     renderSystem(data.system);
