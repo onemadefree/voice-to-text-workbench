@@ -425,12 +425,14 @@ def main() -> int:
 
     # 2. 规划要推送的提交链
     chain = [] if USE_WORKTREE else plan_chain(base, tip)
+    created: list[str] = []          # 本次在远端建出来的提交，稍后要在本地重建
     if chain:
         print(f"  待推送提交链 {len(chain)} 个（保留每个提交各自的说明）", flush=True)
         upload_blobs([ref_entries(c) for c in chain])
         final = base
         for c in chain:
             final = create_commit(c, final)
+            created.append(final)
     else:
         # 单提交路径：工作区内容，或远端与本地已分叉（需要压平）
         print("  单提交路径（压平为 1 个提交）", flush=True)
@@ -464,12 +466,17 @@ def main() -> int:
     api("PATCH", f"/git/refs/heads/{BRANCH}", {"sha": final, "force": True})
     print(f"  ref refs/heads/{BRANCH} → {final[:10]}", flush=True)
 
-    # 4. 本地复刻新提交并对齐分支
-    local_commit = reconstruct_commit(final)
-    same = local_commit == final
-    print(f"  本地 {local_commit[:10]} {'✓ 与远端一致' if same else '✗ 不一致'}")
-    if not same:
-        raise SystemExit("本地与远端 SHA 不一致，终止")
+    # 4. 把远端新建的提交逐个在本地重建
+    #    链式推送会建出多个提交，只重建最后一个的话，
+    #    本地分支指向的提交会「父对象缺失」，git log 直接断链。
+    #    单提交路径下 created 为空，用 final 兜底。
+    targets = created or [final]
+    for sha in targets:
+        local = reconstruct_commit(sha)
+        if local != sha:
+            raise SystemExit(f"提交 {sha[:10]} 本地重建不一致（{local[:10]}），终止")
+    local_commit = targets[-1]
+    print(f"  本地 {local_commit[:10]} ✓ 与远端一致")
 
     git("update-ref", f"refs/heads/{BRANCH}", local_commit)
     git("update-ref", f"refs/remotes/origin/{BRANCH}", final)
