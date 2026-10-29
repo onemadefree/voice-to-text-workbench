@@ -5,6 +5,11 @@
 
 全程离线运行，音频与文稿都不离开本机。
 
+![工作台界面](docs/images/dashboard.jpg)
+
+> 一屏之内：左侧是 `source/` 目录与各篇转写状态，上方是波形播放器（点句跳播、倍速、跟随滚动），
+> 中部是逐字稿（原文与 AI 润色稿对照，逐段可编辑、可单段重润），下方是自动提炼的知识库资料。
+
 ---
 
 ## 一、模型选型结论（2026-10 实测调研）
@@ -46,8 +51,8 @@ cd 语音转文字
 # 处理 source/ 下全部音频
 .venv/bin/python scripts/transcribe.py
 
-# 只处理一个文件，并直接跑完整后处理链
-.venv/bin/python scripts/transcribe.py 周三上午闫树 --rules standard --polish --kb
+# 只处理一个文件（文件名去掉扩展名），并直接跑完整后处理链
+.venv/bin/python scripts/transcribe.py "<文件名>" --rules standard --polish --kb
 
 # 用高精度 1.7B 模型重跑
 .venv/bin/python scripts/transcribe.py --engine qwen3-hq --force
@@ -103,6 +108,8 @@ source/*.mp3
 
 ## 四、界面用法
 
+> 界面全貌见文首的[工作台截图](#本地语音转文字工作台)。
+
 | 区域 | 功能 |
 |---|---|
 | **顶栏** | 选引擎、开始转写、规则清理、AI 润色全篇、生成知识库、导出 |
@@ -134,7 +141,10 @@ source/*.mp3
 │   └── transcript.json   逐字稿数据（含人工修改）
 ├── models/               模型权重
 ├── docs/
-│   └── prompts.md        提示词清单（从代码反推，含参数与调参入口）
+│   ├── prompts.md        提示词清单（从代码反推，含参数与调参入口）
+│   ├── 交付清单.md         交付明细与验收结果
+│   ├── 仪表盘方案.md       状态仪表盘的设计与接口
+│   └── images/           README 用图（工作台截图）
 ├── app/
 │   ├── config.py         配置（全部可用环境变量覆盖）
 │   ├── audio.py          ffmpeg 转码 / 静音检测 / 切片 / 波形
