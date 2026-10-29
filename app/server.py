@@ -149,8 +149,11 @@ def status() -> Dict[str, Any]:
     import os
     import time as _time
     from .monitor import snapshot
-    from .status import read_all
+    from .status import clear_finished, read_all
 
+    # 顺手清掉过期状态文件（内部有节流）：崩掉的作业留下的僵尸记录
+    # 光靠 read_all 隐藏还不够，文件本身也要消失。
+    clear_finished()
     jobs = read_all()
     sys_info = snapshot()
     # 给每个作业挂上它自己进程的 CPU/内存

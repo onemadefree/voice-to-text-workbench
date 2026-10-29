@@ -73,6 +73,53 @@ def run() -> int:
     check("状态为 died", j["state"] == "died", j["state"])
     check("alive 为 False", j["alive"] is False, str(j["alive"]))
 
+    print("· 崩掉的作业会过期消失（以前永远残留）")
+    old = time.time() - (st.KEEP_FINISHED_SECONDS + 60)
+    data["updated_at"] = old
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    ids = [x["id"] for x in st.read_all()]
+    check("过期 24h 的 died 作业不再展示", doc not in ids, str(ids[:5]))
+    # 最近的 died 作业要留着（还能点「重新开始」）
+    data["updated_at"] = time.time()
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    j = [x for x in st.read_all() if x["id"] == doc][0]
+    check("最近的 died 作业仍然展示", j["state"] == "died", j["state"])
+
+    print("· 暂停中但进程也没了 → 算异常退出，不停在「已暂停」")
+    data["stage"] = "paused"
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    j = [x for x in st.read_all() if x["id"] == doc][0]
+    check("状态为 died 而不是 paused", j["state"] == "died", j["state"])
+
+    print("· clear_finished 会清掉过期的僵尸文件")
+    import tempfile
+    with tempfile.TemporaryDirectory(dir=str(ROOT / "output")) as td:
+        orig = st.STATUS_DIR
+        st.STATUS_DIR = Path(td)
+        try:
+            def _write(name, payload):
+                (Path(td) / name).write_text(
+                    json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            _write("fresh_died.json", {
+                "id": "fresh_died", "doc_id": "fresh_died", "kind": "asr",
+                "stage": "loading_model", "pid": 999999, "finished_at": None,
+                "updated_at": time.time(), "started_at": time.time()})
+            _write("old_died.json", {
+                "id": "old_died", "doc_id": "old_died", "kind": "asr",
+                "stage": "loading_model", "pid": 999999, "finished_at": None,
+                "updated_at": old, "started_at": old})
+            _write("done_ok.json", {
+                "id": "done_ok", "doc_id": "done_ok", "kind": "polish",
+                "stage": "done", "pid": 999999, "finished_at": time.time(),
+                "updated_at": time.time(), "started_at": time.time()})
+            n = st.clear_finished(force=True)
+            left = sorted(p.name for p in Path(td).glob("*.json"))
+            check("只清掉过期的僵尸文件", left == ["done_ok.json", "fresh_died.json"],
+                  f"清了 {n} 个，剩 {left}")
+        finally:
+            st.STATUS_DIR = orig
+
     print("· 错误状态")
     st.publish(doc, "asr", "error", "炸了", error="Boom", finished=True)
     j = [x for x in st.read_all() if x["id"] == doc][0]

@@ -179,8 +179,9 @@
   function renderJobs(jobs) {
     var running = [], done = [];
     (jobs || []).forEach(function (j) {
-      if (j.state === 'running' || j.state === 'stale' || j.state === 'died'
-          || j.state === 'paused') running.push(j);
+      // 「进程已退出」的作业不是正在跑的任务，别混在运行面板里冒充进度。
+      // 它归到下面的结束面板，并提供「重新开始」（服务端会断点续跑地拉起）。
+      if (j.state === 'running' || j.state === 'stale' || j.state === 'paused') running.push(j);
       else done.push(j);
     });
     setHTML('jobList', running.length
@@ -192,18 +193,29 @@
       return;
     }
     setHTML('doneList', done.slice(0, 12).map(function (j) {
-      var mark = j.state === 'error' ? '<span class="bad">✕</span>' : '<span class="ok">✓</span>';
-      var dur = j.finished_at && j.started_at
-        ? fmtDur(j.finished_at - j.started_at) : '—';
+      var isDead = j.state === 'died';
+      var mark = j.state === 'error' ? '<span class="bad">✕</span>'
+        : (isDead ? '<span class="warn">⚠</span>' : '<span class="ok">✓</span>');
+      // 崩掉的作业没有 finished_at，用最后一次更新时间算实际跑了多久
+      var endAt = j.finished_at || (isDead ? j.updated_at : null);
+      var dur = endAt && j.started_at ? fmtDur(endAt - j.started_at) : '—';
+      var stage = isDead
+        ? STATE_LABEL.died + (STAGE_LABEL[j.stage] ? '（' + STAGE_LABEL[j.stage] + '）' : '')
+        : (STAGE_LABEL[j.stage] || j.stage);
+      var action = isDead
+        ? '<button class="job-btn" data-job="' + esc(j.doc_id || j.id || '') +
+          '" data-action="resume">重新开始</button>'
+        : '';
       return '<div class="done-row">' + mark +
         '<span class="who">' + esc(j.id) + '</span>' +
         '<span>' + esc(KIND_LABEL[j.kind] || j.kind) + '</span>' +
-        '<span>' + esc(STAGE_LABEL[j.stage] || j.stage) + '</span>' +
+        '<span>' + esc(stage) + '</span>' +
         '<span class="dim model">' + esc(j.model || '—') + '</span>' +
         '<span class="dim">' + dur + '</span>' +
-        '<span class="dim">' + (j.finished_at
-          ? new Date(j.finished_at * 1000).toLocaleString('zh-CN', { hour12: false })
+        '<span class="dim">' + (endAt
+          ? new Date(endAt * 1000).toLocaleString('zh-CN', { hour12: false })
           : '') + '</span>' +
+        action +
       '</div>';
     }).join(''));
   }
@@ -263,8 +275,7 @@
     if (action === 'cancel'
         && !window.confirm('确定取消「' + docId + '」吗？当前批次结束后停止。')) return;
     btn.disabled = true;
-    setJobMsg('正在' + label + '「' + docId + '」…');
-    fetch('/api/jobs/' + encodeURIComponent(docId) + '/control', {
+    setJobMsg('正在' + label + '「' + docId + '」…');    fetch('/api/jobs/' + encodeURIComponent(docId) + '/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: action }),
@@ -298,6 +309,8 @@
   document.addEventListener('DOMContentLoaded', function () {
     $('btnRefresh').addEventListener('click', tick);
     $('jobList').addEventListener('click', onJobAction);
+    // 结束面板里的「重新开始」按钮（崩掉的作业）
+    $('doneList').addEventListener('click', onJobAction);
     start();
   });
 })();

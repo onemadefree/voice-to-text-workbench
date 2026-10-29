@@ -27,6 +27,11 @@ CTL_DIR = config.OUTPUT_DIR / "_ctl"
 STALE_SECONDS = 900
 # 结束多久之后就不再展示了（秒）
 KEEP_FINISHED_SECONDS = 24 * 3600
+# 清理状态文件的最小间隔（秒）：仪表盘每 2 秒轮询一次，别每次都扫全目录
+SWEEP_INTERVAL = 60
+
+# 上次清理的时间戳
+_last_sweep = 0.0
 
 _SLUG_RE = re.compile(r"[^\w一-鿿.-]+")
 
@@ -185,10 +190,16 @@ def read_all() -> List[Dict[str, Any]]:
         except Exception:
             continue
         finished_at = data.get("finished_at")
-        if finished_at and (now - float(finished_at)) > KEEP_FINISHED_SECONDS:
-            continue
         alive = _pid_alive(data.get("pid"))
         updated_at = float(data.get("updated_at") or 0)
+        # 进程没了又没写结束标记 → 异常退出。
+        # 「本来在暂停、但进程也没了」同样算异常退出，否则会永久停在“已暂停”。
+        died = (not finished_at) and (not alive)
+        # 过期判断：正常结束的按 finished_at；异常退出的没有结束标记，
+        # 用最后一次更新时间兜底——否则每崩一次服务就永久留下一个僵尸作业。
+        expiry = finished_at if finished_at else (updated_at if died else None)
+        if expiry and (now - float(expiry)) > KEEP_FINISHED_SECONDS:
+            continue
         stale = bool(alive and not finished_at and (now - updated_at) > STALE_SECONDS)
         done = data.get("done")
         total = data.get("total")
@@ -197,14 +208,13 @@ def read_all() -> List[Dict[str, Any]]:
             pct = max(0, min(100, round(float(done) / float(total) * 100)))
         if finished_at:
             state = "error" if data.get("error") else "done"
+        elif died:
+            state = "died"
         elif data.get("stage") == "paused":
             # 任务被暂停了：进程还活着，但停在批次边界等着
             state = "paused"
-        elif alive:
-            state = "stale" if stale else "running"
         else:
-            # 进程没了却没写结束 → 异常退出
-            state = "died"
+            state = "stale" if stale else "running"
         doc_id = data.get("doc_id") or data.get("id") or path.stem
         jobs.append({
             "id": data.get("id") or data.get("doc_id") or path.stem,
@@ -255,12 +265,24 @@ def job_running(doc_id: str) -> bool:
     return _pid_alive(data.get("pid"))
 
 
-def clear_finished() -> int:
-    """清掉过期与已结束的状态文件。"""
+def clear_finished(force: bool = False) -> int:
+    """清掉过期与已结束的状态文件。
+
+    两种过期：
+      · 正常结束的（有 finished_at）——过了保留期就删；
+      · 异常退出的（进程没了又没写结束标记）——用最后更新时间兜底，
+        否则每崩一次服务就永久留下一个僵尸作业。
+
+    默认带节流：仪表盘每 2 秒轮询一次，别每次都扫全目录。
+    """
+    global _last_sweep
+    now = time.time()
+    if not force and (now - _last_sweep) < SWEEP_INTERVAL:
+        return 0
+    _last_sweep = now
     n = 0
     if not STATUS_DIR.exists():
         return 0
-    now = time.time()
     for path in STATUS_DIR.glob("*.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -269,7 +291,15 @@ def clear_finished() -> int:
             n += 1
             continue
         finished_at = data.get("finished_at")
-        if finished_at and (now - float(finished_at)) > KEEP_FINISHED_SECONDS:
-            path.unlink(missing_ok=True)
-            n += 1
+        if finished_at:
+            if (now - float(finished_at)) > KEEP_FINISHED_SECONDS:
+                path.unlink(missing_ok=True)
+                n += 1
+            continue
+        # 异常退出：进程没了又没写结束标记，按最后更新时间兜底过期
+        if not _pid_alive(data.get("pid")):
+            updated_at = float(data.get("updated_at") or 0)
+            if updated_at and (now - updated_at) > KEEP_FINISHED_SECONDS:
+                path.unlink(missing_ok=True)
+                n += 1
     return n

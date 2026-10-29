@@ -150,6 +150,8 @@
   color: var(--fg);
   cursor: pointer;
   transition: background .15s, border-color .15s;
+  white-space: nowrap;
+  flex: none;
 }
 .job-btn:hover:not(:disabled) { background: rgba(255, 255, 255, .12); }
 .job-btn:disabled { opacity: .45; cursor: default; }
@@ -192,6 +194,7 @@
 }
 .done-row .ok { color: var(--ok); }
 .done-row .bad { color: var(--err); }
+.done-row .warn { color: var(--warn); }
 .done-row .who { color: var(--fg); }
 
 /* ---------- 硬件仪表 ---------- */
