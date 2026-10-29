@@ -10,7 +10,12 @@ git push 无法完成。本脚本改走 api.github.com：
 `git hash-object -t commit -w` 写入本地对象库；SHA 由内容寻址天然一致。
 
 用法：
-    python scripts/push_via_api.py [owner/repo] [--branch=main]
+    python scripts/push_via_api.py [owner/repo] [--branch=main] [--dry-run]
+    python scripts/push_via_api.py --help
+
+⚠️ 本脚本会**直接改写远端分支引用**。运行前请确认：
+    1. `--branch` 指向的远端分支确实是你要覆盖的分支；
+    2. 想先看结果就加 `--dry-run`（只做检查和上传，不改远端引用）。
 """
 
 from __future__ import annotations
@@ -32,6 +37,8 @@ ROOT = Path(__file__).resolve().parent.parent
 REPO = "onemadefree/voice-to-text-workbench"
 BRANCH = "main"
 TOKEN = ""
+DRY_RUN = False
+USE_WORKTREE = False
 
 
 # ------------------------------------------------------------------ 基础工具
@@ -70,6 +77,14 @@ def git(*args: str, input_text: str | None = None) -> str:
     return r.stdout.strip()
 
 
+def git_bytes(*args: str) -> bytes:
+    r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
+                       env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    if r.returncode != 0:
+        raise SystemExit(f"git {' '.join(args)} 失败:\n{r.stderr.decode('utf-8', 'ignore')[:400]}")
+    return r.stdout
+
+
 def local_entries() -> list[tuple[str, str]]:
     """已跟踪文件：(mode, path)"""
     out = git("ls-files", "-s", "-z")
@@ -80,6 +95,25 @@ def local_entries() -> list[tuple[str, str]]:
         meta, path = rec.split("\t", 1)
         mode, _sha, _stage = meta.split(" ", 2)
         entries.append((mode, path))
+    return entries
+
+
+def ref_entries(ref: str) -> list[tuple[str, str, str]]:
+    """指定 ref 的已提交内容：(mode, path, blob_sha)。
+
+    用它而不是工作区，是为了保证「推的是这个分支已提交的内容」——
+    否则在别的分支上跑本脚本会把当前工作区的文件推到目标分支上。
+    """
+    out = git_bytes("ls-tree", "-r", "-z", ref)
+    entries: list[tuple[str, str, str]] = []
+    for rec in out.split(b"\0"):
+        if not rec:
+            continue
+        meta, path = rec.split(b"\t", 1)
+        mode, kind, sha = meta.decode().split(" ", 2)
+        if kind != "blob":
+            continue  # 只推 blob（文件），子模块等类型跳过
+        entries.append((mode, path.decode("utf-8"), sha))
     return entries
 
 
@@ -150,16 +184,24 @@ def local_offsets() -> list[str]:
 
 
 def ident_to_iso(value: str) -> dict:
-    """'Name <email> 1750000000 +0800' → API 用的 author/committer 字典"""
+    """'Name <email> 1750000000 +0800' → API 用的 author/committer 字典
+
+    时间戳与偏移必须自洽：ISO 串里写的是「墙钟 + 偏移」，
+    墙钟要用**作者所在时区**的，不能拿 UTC 墙钟贴本地偏移——
+    那样 GitHub 会按字面时刻收下，推上去的提交时间整体差一个时区。
+    """
     name, _, rest = value.partition(" <")
     email, _, stamp = rest.partition("> ")
     ts, _, offset = stamp.partition(" ")
     offset = offset.strip() or "+0000"
     sign = 1 if offset.startswith("+") else -1
-    total = int(ts) - sign * (int(offset[1:3]) * 3600 + int(offset[3:5]) * 60)
-    dt = datetime.datetime.fromtimestamp(total, datetime.timezone.utc)
-    iso = dt.strftime("%Y-%m-%dT%H:%M:%S") + f"{offset[:3]}:{offset[3:]}"
-    return {"name": name, "email": email, "date": iso, "ts": int(ts), "offset": offset}
+    off_delta = datetime.timedelta(hours=int(offset[1:3]), minutes=int(offset[3:5]))
+    epoch = int(ts)
+    # ts 本身就是绝对时刻；作者所在时区的墙钟 = epoch + 偏移
+    local_dt = datetime.datetime.fromtimestamp(
+        epoch + sign * int(off_delta.total_seconds()), datetime.timezone.utc)
+    iso = local_dt.strftime("%Y-%m-%dT%H:%M:%S") + f"{offset[:3]}:{offset[3:]}"
+    return {"name": name, "email": email, "date": iso, "ts": epoch, "offset": offset}
 
 
 def raw_commit_bytes(tree: str, parents: list[str], message: bytes,
@@ -232,19 +274,66 @@ def bootstrap() -> str:
 
 # ------------------------------------------------------------------ 主流程
 
-def main() -> int:
-    global REPO, BRANCH, TOKEN
-    argv = sys.argv[1:]
+def parse_args(argv: list[str]) -> None:
+    """严格解析参数：未知参数直接报错，绝不静默忽略。
+
+    （旧版本会忽略一切 `--xxx`，导致 `--help` 也照样执行一次真实推送。）
+    """
+    global REPO, BRANCH, TOKEN, DRY_RUN, USE_WORKTREE
+    plain: list[str] = []
     for a in argv:
+        if a in ("-h", "--help"):
+            print(__doc__)
+            raise SystemExit(0)
+        if a == "--dry-run":
+            DRY_RUN = True
+            continue
+        if a == "--worktree":
+            USE_WORKTREE = True
+            continue
         if a.startswith("--branch="):
             BRANCH = a.split("=", 1)[1]
-    plain = [a for a in argv if not a.startswith("--")]
+            continue
+        if a.startswith("-"):
+            raise SystemExit(f"未知参数 {a!r}；用法见 --help")
+        plain.append(a)
+    if len(plain) > 1:
+        raise SystemExit(f"最多接受一个 owner/repo 参数，收到 {len(plain)} 个")
     if plain:
         REPO = plain[0]
+
+
+def pick_source() -> tuple[list[tuple[str, str, str]], str]:
+    """决定推送哪份内容，返回 (entries, 来源说明)。
+
+    默认推 **目标分支已提交的内容**——这样在别的分支上跑本脚本，
+    不会把当前工作区的文件错推到目标分支上（这是旧版本最危险的行为）。
+    """
+    source_ref = f"refs/heads/{BRANCH}"
+    if USE_WORKTREE:
+        cur = git("rev-parse", "--abbrev-ref", "HEAD")
+        if cur != BRANCH:
+            raise SystemExit(
+                f"--worktree 要求当前就在 {BRANCH} 上（当前在 {cur}）。\n"
+                "不指定 --worktree 时推的是该分支已提交的内容，更安全。")
+        # 把磁盘内容写进对象库，再用它的 SHA 参与上传
+        return [(m, p, git("hash-object", "-w", "--", p)) for m, p in local_entries()], \
+            "工作区内容（含未提交改动）"
+
+    if git("rev-parse", "--verify", "--quiet", source_ref):
+        return ref_entries(source_ref), f"{source_ref} 已提交内容"
+    # 本地没有这个分支 → 退到 HEAD，并在输出里明说
+    return ref_entries("HEAD"), "HEAD 已提交内容（本地无该分支）"
+
+
+def main() -> int:
+    global TOKEN
+    parse_args(sys.argv[1:])
     TOKEN = gh_token()
 
-    entries = local_entries()
-    print(f"仓库 {REPO}　分支 {BRANCH}　文件 {len(entries)} 个", flush=True)
+    entries, source_desc = pick_source()
+    print(f"仓库 {REPO}　分支 {BRANCH}　来源 {source_desc}　文件 {len(entries)} 个",
+          flush=True)
 
     base = remote_head()
     if not base:
@@ -257,17 +346,15 @@ def main() -> int:
 
     # 2. 上传 blob
     tree_entries = []
-    for mode, path in entries:
-        data = (ROOT / path).read_bytes()
+    for mode, path, sha in entries:
+        data = git_bytes("cat-file", "blob", sha)
         blob = api("POST", "/git/blobs", {
             "content": base64.b64encode(data).decode("ascii"),
             "encoding": "base64",
         })
-        # 同时把内容写进本地对象库：工作区有未提交改动时，本地对象库里还没有
-        # 这个 blob，后面 build_tree 会因为 "invalid object" 失败
-        local_blob = git("hash-object", "-w", "--", path)
-        if local_blob != blob["sha"]:
-            raise SystemExit(f"{path}: 本地 blob {local_blob[:10]} 与远端 {blob['sha'][:10]} 不一致")
+        # blob 字节直接取自本地对象库，内容寻址保证 SHA 必然一致
+        if sha != blob["sha"]:
+            raise SystemExit(f"{path}: 本地 blob {sha[:10]} 与远端 {blob['sha'][:10]} 不一致")
         tree_entries.append({"path": path, "mode": mode, "type": "blob", "sha": blob["sha"]})
     print(f"  上传 blob {len(tree_entries)} 个", flush=True)
 
@@ -279,7 +366,7 @@ def main() -> int:
     if local_tree != tree["sha"]:
         raise SystemExit("远端 tree 与本地重建 tree 不一致，终止")
 
-    # 4. 建 commit（父 = 远端当前 head）
+    # 4. 建 commit（父 = 远端当前 head；作者/说明取自本地 HEAD）
     head = git("cat-file", "commit", "HEAD")
     head_meta, _, message = head.partition("\n\n")
     author = committer = None
@@ -300,6 +387,12 @@ def main() -> int:
     })
     print(f"  commit {commit['sha'][:10]}", flush=True)
 
+    if DRY_RUN:
+        print(f"\n[dry-run] 未改远端引用。将会把 refs/heads/{BRANCH} "
+              f"→ {commit['sha'][:10]}")
+        print(f"[dry-run] 去掉 --dry-run 再跑一次即可真正推送。")
+        return 0
+
     # 5. 更新 ref
     api("PATCH", f"/git/refs/heads/{BRANCH}", {"sha": commit["sha"], "force": True})
     print(f"  ref refs/heads/{BRANCH} → {commit['sha'][:10]}", flush=True)
@@ -313,8 +406,12 @@ def main() -> int:
 
     git("update-ref", f"refs/heads/{BRANCH}", local_commit)
     git("update-ref", f"refs/remotes/origin/{BRANCH}", commit["sha"])
-    subprocess.run(["git", "reset", "--mixed", local_commit], cwd=ROOT, check=False,
-                   capture_output=True)
+    # 只有当 HEAD 本来就在这个分支上时才同步工作区；
+    # 否则绝不能 reset——那会把当前分支拽到别的分支的提交上。
+    cur = git("rev-parse", "--abbrev-ref", "HEAD")
+    if cur == BRANCH:
+        subprocess.run(["git", "reset", "--mixed", local_commit], cwd=ROOT, check=False,
+                       capture_output=True)
     print(f"\n✓ 推送完成：https://github.com/{REPO}")
     return 0
 
